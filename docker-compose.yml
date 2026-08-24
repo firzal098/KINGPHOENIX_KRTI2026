@@ -26,4 +26,7 @@ services:
       - /mnt/wslg:/mnt/wslg:rw
       # Mount host source code into container's workspace
       - ./src:/ros_ws/src
+      - ./.vscode:/ros_ws/.vscode
+      - ./.devcontainer:/ros_ws/.devcontainer
+      
     working_dir: /ros_ws

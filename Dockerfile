@@ -83,5 +83,7 @@ RUN apt-get install -y tcpdump
 COPY ros_entrypoint.sh /ros_entrypoint.sh
 RUN chmod +x /ros_entrypoint.sh
 
+RUN echo "v1.7"
+
 ENTRYPOINT ["/ros_entrypoint.sh"]
 CMD ["bash"]

@@ -11,4 +11,14 @@ if [ -f "/ros_ws/install/setup.bash" ]; then
     source "/ros_ws/install/setup.bash"
 fi
 
-exec "$@"
+# Strip any leading '--' occurrences
+while [ "$1" = "--" ]; do
+    shift
+done
+
+# If arguments remain, execute them; otherwise start bash
+if [ $# -gt 0 ]; then
+    exec "$@"
+else
+    exec bash
+fi

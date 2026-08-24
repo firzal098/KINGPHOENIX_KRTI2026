@@ -1,0 +1,19 @@
+{
+  "configurations": [
+    {
+      "name": "ROS 2 Jazzy Container",
+      "includePath": [
+        "${workspaceFolder}/src/**",
+        "/opt/ros/jazzy/include/**",
+        "/ros_ws/install/*/include/**",
+        "/usr/include/opencv4",
+        "/usr/include/**"
+      ],
+      "defines": [],
+      "cStandard": "c17",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "linux-gcc-x64"
+    }
+  ],
+  "version": 4
+}

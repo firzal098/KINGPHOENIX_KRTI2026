@@ -1,0 +1,10 @@
+{
+  "python.defaultInterpreterPath": "/usr/bin/python3",
+  "python.analysis.autoSearchPaths": true,
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.extraPaths": [
+    "/opt/ros/jazzy/lib/python3.12/site-packages",
+    "/opt/ros/jazzy/local/lib/python3.12/dist-packages",
+    "/ros_ws/install/*/lib/python3.12/site-packages"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+    "name": "ROS 2 Jazzy Development",
+    "dockerComposeFile": "../docker-compose.yml",
+    "service": "ros_desktop",
+    "workspaceFolder": "/ros_ws",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-vscode.cpptools"
+            ]
+        }
+    },
+    "overrideCommand": true
+}
