@@ -85,5 +85,9 @@ RUN chmod +x /ros_entrypoint.sh
 
 RUN echo "v1.7"
 
+RUN apt-get update && apt-get install ros-$ROS_DISTRO-foxglove-bridge
+
+
+
 ENTRYPOINT ["/ros_entrypoint.sh"]
 CMD ["bash"]

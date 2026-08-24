@@ -1,5 +1,8 @@
+import os
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, TimerAction
+from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -44,10 +47,58 @@ def generate_launch_description():
         }]
     )
 
+    # # Foxglove Bridge — allows connecting Foxglove Studio to this ROS instance
+    # foxglove_bridge_launch = IncludeLaunchDescription(
+    #     AnyLaunchDescriptionSource(
+    #         os.path.join(
+    #             get_package_share_directory('foxglove_bridge'),
+    #             'launch',
+    #             'foxglove_bridge_launch.xml'
+    #         )
+    #     )
+    # )
+
+    # MAVROS — connects to ArduPilot/PX4 SITL via TCP and forwards GCS via UDP
+    mavros_launch = IncludeLaunchDescription(
+        AnyLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory('mavros'),
+                'launch',
+                'apm.launch'
+            )
+        ),
+        launch_arguments={
+            'fcu_url':       'tcp://172.24.123.183:5760',
+            'gcs_url':       'udp://@172.24.112.1:14550',
+            'tgt_system':    '1',
+            'tgt_component': '1',
+        }.items()
+    )
+
+    # Set MAVLink message interval for LOCAL_POSITION_NED (msg ID 32) at 50 Hz.
+    # Delayed 5 s to give MAVROS time to fully connect to the FCU before calling.
+    set_message_interval = TimerAction(
+        period=5.0,
+        actions=[
+            ExecuteProcess(
+                cmd=[
+                    'ros2', 'service', 'call',
+                    '/mavros/set_message_interval',
+                    'mavros_msgs/srv/MessageInterval',
+                    '{message_id: 32, message_rate: 50.0}',
+                ],
+                output='screen',
+            )
+        ]
+    )
+
     return LaunchDescription([
         server_ip_arg,
         server_port_arg,
         frame_id_arg,
         fov_arg,
         camera_node,
+        # foxglove_bridge_launch,
+        # mavros_launch,
+        # set_message_interval,
     ])
