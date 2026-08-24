@@ -1,0 +1,29 @@
+services:
+  ros_desktop:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ROS_DISTRO: jazzy
+    container_name: ros_jazzy_container
+    stdin_open: true  # Keeps standard in open (-i)
+    tty: true         # Allocates a pseudo-TTY (-t)
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - WAYLAND_DISPLAY=${WAYLAND_DISPLAY}
+      - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}
+      - PULSE_SERVER=${PULSE_SERVER}
+      - QT_X11_NO_MITSHM=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    volumes:
+      # Fix: Upper-case 'X' in X11 (Linux paths are case-sensitive)
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # WSLg socket and display runtime mount
+      - /mnt/wslg:/mnt/wslg:rw
+      # Mount host source code into container's workspace
+      - ./src:/ros_ws/src
+    working_dir: /ros_ws
