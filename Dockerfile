@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-vcstool \
     python3-pip \
     python3-argcomplete \
+    python3.12-venv \
     wget \
     curl \
     nano \
@@ -77,17 +78,54 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     
 ENV GSCAM_CONFIG="udpsrc port=5599 caps=\"image/jpeg\" ! jpegdec ! videoconvert"
 
-RUN apt-get install -y tcpdump
-
 # Copy and setup entrypoint
 COPY ros_entrypoint.sh /ros_entrypoint.sh
 RUN chmod +x /ros_entrypoint.sh
 
-RUN echo "v1.7"
+# Install Foxglove Bridge + vision_msgs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ros-${ROS_DISTRO}-foxglove-bridge \
+    ros-${ROS_DISTRO}-vision-msgs \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install ros-$ROS_DISTRO-foxglove-bridge
 
+# ── Custom Python libraries ───────────────────────────────────────────────────
+# Install into the SYSTEM Python so ros2 run / ros2 launch nodes can import
+# them directly. Using --break-system-packages is safe here because this is
+# an isolated Docker container (PEP 668 doesn't apply).
+COPY src/requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
+        -r /tmp/requirements.txt
 
+RUN echo "v2.0"
+
+# ── CUDA 13 runtime + cuDNN installation ────────────────────────────────────
+ARG INSTALL_CUDA=false
+RUN if [ "$INSTALL_CUDA" = "true" ]; then \
+    apt-get update && apt-get install -y --no-install-recommends wget ca-certificates gnupg && \
+    wget -qO /tmp/cuda-keyring.deb \
+        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && \
+    dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        cuda-cudart-13-3 \
+        cuda-nvrtc-13-3 \
+        libcublas-13-3 \
+        libcurand-13-3 \
+        libcufft-13-3 \
+        libcudnn9-cuda-13 && \
+    echo "/usr/local/cuda/lib64" > /etc/ld.so.conf.d/cuda.conf && \
+    echo "/usr/local/cuda-13.3/lib64" >> /etc/ld.so.conf.d/cuda.conf && \
+    echo "/usr/local/cuda-13.3/targets/x86_64-linux/lib" >> /etc/ld.so.conf.d/cuda.conf && \
+    ldconfig; \
+fi
+
+# ── Separate cleanup step ───────────────────────────────────────────────────
+ARG INSTALL_CUDA=false
+RUN if [ "$INSTALL_CUDA" = "true" ]; then \
+    rm -rf /usr/local/cuda*/include /usr/share/doc /usr/share/man /var/lib/apt/lists/*; \
+fi
+
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda-13.3/lib64:/usr/local/cuda-13.3/targets/x86_64-linux/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
 
 ENTRYPOINT ["/ros_entrypoint.sh"]
 CMD ["bash"]

@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
       args:
         ROS_DISTRO: jazzy
+        INSTALL_CUDA: ${INSTALL_CUDA:-false}
     container_name: ros_jazzy_container
     stdin_open: true  # Keeps standard in open (-i)
     tty: true         # Allocates a pseudo-TTY (-t)
@@ -28,5 +29,13 @@ services:
       - ./src:/ros_ws/src
       - ./.vscode:/ros_ws/.vscode
       - ./.devcontainer:/ros_ws/.devcontainer
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
       
     working_dir: /ros_ws

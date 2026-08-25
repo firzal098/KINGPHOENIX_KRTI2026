@@ -99,6 +99,6 @@ def generate_launch_description():
         fov_arg,
         camera_node,
         # foxglove_bridge_launch,
-        # mavros_launch,
-        # set_message_interval,
+        mavros_launch,
+        set_message_interval,
     ])

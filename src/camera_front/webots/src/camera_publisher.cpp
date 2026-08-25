@@ -29,7 +29,7 @@ public:
     this->declare_parameter<std::string>("server_ip", "127.0.0.1");
     this->declare_parameter<int>("server_port", 5600);
     this->declare_parameter<std::string>("frame_id", "camera_front_optical_frame");
-    this->declare_parameter<double>("fov", 1.0472); // ~60 degrees horizontal FOV
+    this->declare_parameter<double>("fov", 1.0); // ~60 degrees horizontal FOV
 
     server_ip_ = this->get_parameter("server_ip").as_string();
     server_port_ = this->get_parameter("server_port").as_int();

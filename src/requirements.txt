@@ -1,2 +1,9 @@
+# Single requirements file for all Python packages in this workspace.
+# These are installed into /ros_ws/.venv inside the Docker container.
+# The venv is created with --system-site-packages so ROS 2 (rclpy, etc.) remains accessible.
+#
+# Run `docker compose build` after editing this file.
 
-uv==0.12.5
+onnxruntime-gpu
+opencv-contrib-python
+scipy

@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'cuda'
+package_name = 'cuda_gate_inference'
 
 setup(
     name=package_name,
@@ -10,6 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/resource', ['resource/gate_keypoints.onnx']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -24,6 +25,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'gate_perception = cuda_gate_inference:main',
         ],
     },
 )
