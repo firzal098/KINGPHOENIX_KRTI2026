@@ -76,7 +76,8 @@ def generate_launch_description():
     )
 
     # Set MAVLink message interval for LOCAL_POSITION_NED (msg ID 32) at 50 Hz.
-    # Delayed 5 s to give MAVROS time to fully connect to the FCU before calling.
+    # Delayed 15 s: gives MAVROS time to connect AND ArduPilot EKF time to initialise
+    # before the service call is made (EKF can take 10-30 s after SITL boot).
     set_message_interval = TimerAction(
         period=5.0,
         actions=[
@@ -92,6 +93,40 @@ def generate_launch_description():
         ]
     )
 
+    # Belt-and-suspenders: also enable ArduPilot stream 10 (EXTRA1) at 50 Hz via
+    # mavros/set_stream_rate. LOCAL_POSITION_NED is part of this stream group and
+    # this call works even if set_message_interval is not supported by the firmware.
+    set_stream_rate = TimerAction(
+        period=20.0,
+        actions=[
+            ExecuteProcess(
+                cmd=[
+                    'ros2', 'service', 'call',
+                    '/mavros/set_stream_rate',
+                    'mavros_msgs/srv/StreamRate',
+                    '{stream_id: 10, message_rate: 50, on_off: true}',
+                ],
+                output='screen',
+            )
+        ]
+    )
+
+    # Mavros estimator — fuses MAVROS state with gate detections for position estimation
+    mavros_estimator_node = Node(
+        package='mavros_estimator',
+        executable='mavros_gate_estimator',
+        name='mavros_gate_estimator',
+        output='screen',
+    )
+
+    # CUDA gate inference — runs the TensorRT/ONNX gate keypoint detector on the GPU
+    cuda_gate_inference_node = Node(
+        package='cuda_gate_inference',
+        executable='gate_perception',
+        name='cuda_gate_inference',
+        output='screen',
+    )
+
     return LaunchDescription([
         server_ip_arg,
         server_port_arg,
@@ -101,4 +136,7 @@ def generate_launch_description():
         # foxglove_bridge_launch,
         mavros_launch,
         set_message_interval,
+        set_stream_rate,
+        mavros_estimator_node,
+        cuda_gate_inference_node,
     ])
