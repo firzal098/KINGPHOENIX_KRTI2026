@@ -29,7 +29,7 @@ def generate_launch_description():
 
     fov_arg = DeclareLaunchArgument(
         'fov',
-        default_value='1.0472',
+        default_value='1.0',
         description='Horizontal field of view in radians (~60 degrees)'
     )
 
@@ -113,9 +113,23 @@ def generate_launch_description():
 
     # Mavros estimator — fuses MAVROS state with gate detections for position estimation
     mavros_estimator_node = Node(
-        package='mavros_estimator',
+        package='mavros_controller',
         executable='mavros_gate_estimator',
         name='mavros_gate_estimator',
+        output='screen',
+        parameters=[{
+            'pnp_vision_sigma':      2.0,
+            'drone_pose_sigma':      1.0,
+            'gate_prior_sigma':      2.0,
+            'association_max_dist':  10,
+        }],
+    )
+
+    # ArduPilot MAVROS Controller — FSM-based takeoff/hover/land state machine
+    controller_node = Node(
+        package='mavros_controller',
+        executable='controller',
+        name='controller',
         output='screen',
     )
 
@@ -125,6 +139,18 @@ def generate_launch_description():
         executable='gate_perception',
         name='cuda_gate_inference',
         output='screen',
+    )
+
+    camera_front_optical_frame = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='base_to_camera_optical_tf',
+        arguments=[
+            '--x', '0.1', '--y', '0.0', '--z', '0.0',
+            '--roll', '-1.5707963', '--pitch', '0.0', '--yaw', '-1.5707963',
+            '--frame-id', 'base_link',
+            '--child-frame-id', 'camera_front_optical_frame'
+        ]
     )
 
     return LaunchDescription([
@@ -139,4 +165,6 @@ def generate_launch_description():
         set_stream_rate,
         mavros_estimator_node,
         cuda_gate_inference_node,
+        controller_node,
+        # camera_front_optical_frame
     ])
