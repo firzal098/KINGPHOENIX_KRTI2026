@@ -1,0 +1,1377 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/floors/protos/Floor.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/appearances/protos/Grass.proto"
+EXTERNPROTO "../protos/Iris.proto"
+
+WorldInfo {
+  title "Iris Ardupilot"
+  basicTimeStep 2
+  FPS 20
+}
+Viewpoint {
+  orientation -0.10415197367227737 -0.1271722864363979 0.9863972708512063 4.463292788713611
+  position 1.9276174452153678 37.63063467885747 3.3438512829690468
+  follow "Iris"
+  followSmoothness 0.01
+}
+TexturedBackground {
+}
+TexturedBackgroundLight {
+}
+Floor {
+  size 80 80
+  appearance Grass {
+  }
+}
+DEF WP1 Pose {
+  translation -5.64 22.03 1.45479e-06
+  rotation 0 1 0 4.692820414042842e-06
+  children [
+    Solid {
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 2 2 0.1
+          }
+        }
+      ]
+    }
+    Solid {
+      translation 0 0 0.03
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 1 1 1
+            }
+          }
+          geometry Box {
+            size 0.5 0.5 0.05
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+  ]
+}
+DEF WP1 Pose {
+  translation -12.11 13.34 3.18187e-05
+  rotation 0 1 0 4.692820414042842e-06
+  children [
+    Solid {
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 2 2 0.1
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    Solid {
+      translation 0 0 0.03
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 1 1 1
+            }
+          }
+          geometry Box {
+            size 0.5 0.5 0.05
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+  ]
+}
+DEF WP1 Pose {
+  translation -18.37 -0.78 6.11957e-05
+  rotation 0 1 0 4.692820414042842e-06
+  children [
+    Solid {
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 2 2 0.1
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    Solid {
+      translation 0 0 0.03
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 1 1 1
+            }
+          }
+          geometry Box {
+            size 0.5 0.5 0.05
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+  ]
+}
+DEF WP_RedBox Pose {
+  translation -12.14 22.04 0
+  children [
+    Pose {
+      children [
+        DEF Pad Solid {
+          translation 0 0 0.05
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 1 0 0
+                }
+              }
+              geometry Box {
+                size 0.62 0.415 0.025
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF Pad Solid {
+          translation 0.3 0 0.13
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 1 0 0
+                }
+              }
+              geometry Box {
+                size 0.01 0.415 0.145
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF Pad Solid {
+          translation -0.3 0 0.13
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 1 0 0
+                }
+              }
+              geometry Box {
+                size 0.01 0.415 0.145
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF Pad Solid {
+          translation 7.3464e-07 -0.199999 0.13
+          rotation 0 0 1 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 1 0 0
+                }
+              }
+              geometry Box {
+                size 0.01 0.62 0.145
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF Pad Solid {
+          translation -7.34641e-07 0.200001 0.13
+          rotation 0 0 1 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 1 0 0
+                }
+              }
+              geometry Box {
+                size 0.01 0.62 0.145
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+      ]
+    }
+    DEF Pad Solid {
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 2 2 0.1
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+  ]
+}
+DEF Line Pose {
+  translation -12.661 10.7874 0
+  rotation 0 0 1 -0.523595307179586
+  children [
+    DEF Pad Solid {
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0 0 0
+            }
+          }
+          geometry Box {
+            size 0.45 2 0.1
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Pad Solid {
+      translation 0 -2.6 0
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0 0 0
+            }
+          }
+          geometry Box {
+            size 0.45 2 0.1
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Pad Solid {
+      translation 0 -5.19 0
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0 0 0
+            }
+          }
+          geometry Box {
+            size 0.45 2 0.1
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Pad Solid {
+      translation 0 -7.72 0
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0 0 0
+            }
+          }
+          geometry Box {
+            size 0.45 2 0.1
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Pad Solid {
+      translation 0 -10.27 0
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0 0 0
+            }
+          }
+          geometry Box {
+            size 0.45 2 0.1
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+  ]
+}
+DEF StartZone Pose {
+  translation -4.7 4.24 0
+  children [
+    DEF Pad Solid {
+      translation 5.58 20.21 0
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0 0 1
+            }
+          }
+          geometry Box {
+            size 1 1 0.1
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+  ]
+}
+DEF LandingPad Pose {
+  translation 0.07 -13.69 0.67
+  children [
+    DEF Pad Solid {
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0 0 1
+            }
+          }
+          geometry Box {
+            size 1.5 1 0.1
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+  ]
+}
+DEF Elevation Pose {
+  translation -17.42 5.76 0
+  children [
+    DEF Pad Solid {
+      translation 17.73 -67.8 0.19
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              ambientIntensity 0.5
+              diffuseColor 0.435294 0.647059 0.368627
+              shininess 0
+            }
+          }
+          geometry Cylinder {
+            height 1
+            radius 50
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+  ]
+}
+Iris {
+  hidden linearVelocity_0 1.3617574624525543e-18 -5.887199870199556e-20 -1.0728653979151513e-15
+  hidden angularVelocity_0 -7.623849096138414e-18 7.623849096138414e-18 -9.82404837465269e-19
+  translation 0.92 24.47 0.054963212500000025
+  rotation -5.544656945307699e-18 5.5582612632873196e-18 1 1.5708000000000002
+  controller "ardupilot_vehicle_controller"
+  controllerArgs [
+    "--motors"
+    "m1_motor, m2_motor, m3_motor, m4_motor"
+    "--sitl-address"
+    "172.24.123.183"
+  ]
+}
+DEF SingleGate1 Pose {
+  translation 0.17 9.26 0
+  children [
+    DEF Pole1 Solid {
+      translation 0 0 0.99
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+            }
+          }
+          geometry Cylinder {
+            radius 0.007
+          }
+        }
+      ]
+      name "solid(2)"
+    }
+    DEF Pole2 Solid {
+      translation 1.90312 0 0.99
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+            }
+          }
+          geometry Cylinder {
+            radius 0.007
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Banner2 Solid {
+      translation 1.79511 0 1.02
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 0.21602 0.004 1.5
+          }
+        }
+      ]
+      name "solid(5)"
+    }
+    DEF Banner3 Solid {
+      translation 0.95511 0 1.88
+      rotation 0 1 0 1.5708
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 0.21602 0.004 1.90312
+          }
+        }
+      ]
+      name "solid(7)"
+    }
+    DEF Banner4 Solid {
+      translation 0.10511 0 1.02
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 0.21602 0.004 1.5
+          }
+        }
+      ]
+      name "solid(6)"
+    }
+    DEF Pole3 Solid {
+      translation 0.95312 0 1.99
+      rotation 0 1 0 1.5708
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+            }
+          }
+          geometry Cylinder {
+            height 1.90312
+            radius 0.007
+          }
+        }
+      ]
+      name "solid(4)"
+    }
+  ]
+}
+DEF SingleGate1 Pose {
+  translation -19.31 -2.88 0
+  children [
+    DEF Pole1 Solid {
+      translation 0 0 0.99
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+            }
+          }
+          geometry Cylinder {
+            radius 0.007
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Pole2 Solid {
+      translation 1.90312 0 0.99
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+            }
+          }
+          geometry Cylinder {
+            radius 0.007
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Banner2 Solid {
+      translation 1.79511 0 1.02
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 0.21602 0.004 1.5
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Banner3 Solid {
+      translation 0.95511 0 1.88
+      rotation 0 1 0 1.5708
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 0.21602 0.004 1.90312
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Banner4 Solid {
+      translation 0.10511 0 1.02
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 0.21602 0.004 1.5
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Pole3 Solid {
+      translation 0.95312 0 1.99
+      rotation 0 1 0 1.5708
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+            }
+          }
+          geometry Cylinder {
+            height 1.90312
+            radius 0.007
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+  ]
+}
+DEF SingleGate1 Pose {
+  translation -2.93 14.59 0
+  children [
+    DEF Pole1 Solid {
+      translation 0 0 0.99
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+            }
+          }
+          geometry Cylinder {
+            radius 0.007
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Pole2 Solid {
+      translation 1.90312 0 0.99
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+            }
+          }
+          geometry Cylinder {
+            radius 0.007
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Banner2 Solid {
+      translation 1.79511 0 1.02
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 0.21602 0.004 1.5
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Banner3 Solid {
+      translation 0.95511 0 1.88
+      rotation 0 1 0 1.5708
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 0.21602 0.004 1.90312
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Banner4 Solid {
+      translation 0.10511 0 1.02
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+              diffuseColor 0.913725 0.572549 0.0666667
+            }
+          }
+          geometry Box {
+            size 0.21602 0.004 1.5
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+    DEF Pole3 Solid {
+      translation 0.95312 0 1.99
+      rotation 0 1 0 1.5708
+      children [
+        Shape {
+          appearance Appearance {
+            material Material {
+            }
+          }
+          geometry Cylinder {
+            height 1.90312
+            radius 0.007
+          }
+        }
+      ]
+      name "solid(3)"
+    }
+  ]
+}
+DEF DoubleGate1 Pose {
+  translation -8.33 21.1 0
+  rotation 0 0 1 1.5708
+  children [
+    DEF Gate1 Pose {
+      children [
+        DEF Pole1 Solid {
+          translation 0 0 0.99
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(5)"
+        }
+        DEF Pole2 Solid {
+          translation 1.90312 0 0.99
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(5)"
+        }
+        DEF Banner2 Solid {
+          translation 1.79511 0 1.02
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.5
+              }
+            }
+          ]
+          name "solid(5)"
+        }
+        DEF Banner3 Solid {
+          translation 0.95511 0 1.88
+          rotation 0 1 0 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.90312
+              }
+            }
+          ]
+          name "solid(5)"
+        }
+        DEF Banner4 Solid {
+          translation 0.10511 0 1.02
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.5
+              }
+            }
+          ]
+          name "solid(5)"
+        }
+        DEF Pole3 Solid {
+          translation 0.95312 0 1.99
+          rotation 0 1 0 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                height 1.90312
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(5)"
+        }
+      ]
+    }
+    DEF Gate1 Pose {
+      translation 0 1 0
+      children [
+        DEF Pole1 Solid {
+          translation 0 0 0.99
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(6)"
+        }
+        DEF Pole2 Solid {
+          translation 1.90312 0 0.99
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(6)"
+        }
+        DEF Banner2 Solid {
+          translation 1.79511 0 1.02
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.5
+              }
+            }
+          ]
+          name "solid(6)"
+        }
+        DEF Banner3 Solid {
+          translation 0.95511 0 1.88
+          rotation 0 1 0 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.90312
+              }
+            }
+          ]
+          name "solid(6)"
+        }
+        DEF Banner4 Solid {
+          translation 0.10511 0 1.02
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.5
+              }
+            }
+          ]
+          name "solid(6)"
+        }
+        DEF ExtendBanner4 Solid {
+          translation -0.00488807 -0.5 1.13
+          rotation 0 0 1 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 1 0.004 1.71602
+              }
+            }
+          ]
+          name "solid(1)"
+        }
+        DEF ExtendBanner4 Solid {
+          translation 1.89511 -0.499999 1.13
+          rotation 0 0 1 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 1 0.004 1.71602
+              }
+            }
+          ]
+          name "solid(6)"
+        }
+        DEF ExtendBanner4 Solid {
+          translation 0.94511 -0.499999 1.99
+          rotation 0.5773489358556708 0.5773509358554485 -0.5773509358554485 -2.094395307179586
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 1 0.004 1.9
+              }
+            }
+          ]
+          name "solid(6)"
+        }
+        DEF Pole3 Solid {
+          translation 0.95312 0 1.99
+          rotation 0 1 0 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                height 1.90312
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(6)"
+        }
+      ]
+    }
+  ]
+}
+DEF TripleGate1 Pose {
+  translation -13.05 16.6 0
+  children [
+    DEF Gate1 Pose {
+      children [
+        DEF Pole1 Solid {
+          translation 0 0 0.99
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(2)"
+        }
+        DEF Pole2 Solid {
+          translation 1.90312 0 0.99
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(2)"
+        }
+        DEF Banner2 Solid {
+          translation 1.79511 0 1.02
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.5
+              }
+            }
+          ]
+          name "solid(2)"
+        }
+        DEF Banner3 Solid {
+          translation 0.95511 0 1.88
+          rotation 0 1 0 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.90312
+              }
+            }
+          ]
+          name "solid(2)"
+        }
+        DEF Banner4 Solid {
+          translation 0.10511 0 1.02
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.5
+              }
+            }
+          ]
+          name "solid(2)"
+        }
+        DEF Pole3 Solid {
+          translation 0.95312 0 1.99
+          rotation 0 1 0 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                height 1.90312
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(2)"
+        }
+      ]
+    }
+    DEF Gate1 Pose {
+      translation 0 1 0
+      children [
+        DEF Pole1 Solid {
+          translation 0 0 0.99
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(2)"
+        }
+        DEF Pole2 Solid {
+          translation 1.90312 0 0.99
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(2)"
+        }
+        DEF Banner2 Solid {
+          translation 1.79511 0 1.02
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.5
+              }
+            }
+          ]
+          name "solid(2)"
+        }
+        DEF Banner3 Solid {
+          translation 0.95511 0 1.88
+          rotation 0 1 0 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.90312
+              }
+            }
+          ]
+          name "solid(2)"
+        }
+        DEF Banner4 Solid {
+          translation 0.10511 0 1.02
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.5
+              }
+            }
+          ]
+          name "solid(2)"
+        }
+        DEF ExtendBanner4 Solid {
+          translation -0.00488807 -0.5 1.13
+          rotation 0 0 1 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 1 0.004 1.71602
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF ExtendBanner4 Solid {
+          translation 1.89511 -0.499999 1.13
+          rotation 0 0 1 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 1 0.004 1.71602
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF ExtendBanner4 Solid {
+          translation 0.94511 -0.499999 1.99
+          rotation 0.5773489358556708 0.5773509358554485 -0.5773509358554485 -2.094395307179586
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 1 0.004 1.9
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF Pole3 Solid {
+          translation 0.95312 0 1.99
+          rotation 0 1 0 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                height 1.90312
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+      ]
+    }
+    DEF Gate1 Pose {
+      translation 0 2 0
+      children [
+        DEF Pole1 Solid {
+          translation 0 0 0.99
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF Pole2 Solid {
+          translation 1.90312 0 0.99
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF Banner2 Solid {
+          translation 1.79511 0 1.02
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.5
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF Banner3 Solid {
+          translation 0.95511 0 1.88
+          rotation 0 1 0 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.90312
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF Banner4 Solid {
+          translation 0.10511 0 1.02
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 0.21602 0.004 1.5
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF ExtendBanner4 Solid {
+          translation -0.00488807 -0.5 1.13
+          rotation 0 0 1 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 1 0.004 1.71602
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF ExtendBanner4 Solid {
+          translation 1.89511 -0.499999 1.13
+          rotation 0 0 1 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 1 0.004 1.71602
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF ExtendBanner4 Solid {
+          translation 0.94511 -0.499999 1.99
+          rotation 0.5773489358556708 0.5773509358554485 -0.5773509358554485 -2.094395307179586
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                  diffuseColor 0.913725 0.572549 0.0666667
+                }
+              }
+              geometry Box {
+                size 1 0.004 1.9
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+        DEF Pole3 Solid {
+          translation 0.95312 0 1.99
+          rotation 0 1 0 1.5708
+          children [
+            Shape {
+              appearance Appearance {
+                material Material {
+                }
+              }
+              geometry Cylinder {
+                height 1.90312
+                radius 0.007
+              }
+            }
+          ]
+          name "solid(3)"
+        }
+      ]
+    }
+  ]
+}

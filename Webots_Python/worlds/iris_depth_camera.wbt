@@ -1,0 +1,136 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/road/protos/StraightRoadSegment.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/floors/protos/Floor.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/appearances/protos/Grass.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/humans/pedestrian/protos/Pedestrian.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/buildings/protos/Warehouse.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/advertising_board/protos/AdvertisingBoard.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023a/projects/objects/tables/protos/Table.proto"
+EXTERNPROTO "../protos/Iris.proto"
+
+WorldInfo {
+  title "Iris Ardupilot"
+  basicTimeStep 2
+  FPS 20
+}
+Viewpoint {
+  orientation -0.0539529834117712 -0.5568237401072458 0.828876587939331 6.050445204035186
+  position -19.23201606695116 3.6827839891227785 3.413025167511976
+  follow "Iris"
+  followSmoothness 0.01
+}
+TexturedBackground {
+}
+TexturedBackgroundLight {
+}
+Floor {
+  size 300 100
+  appearance Grass {
+  }
+}
+StraightRoadSegment {
+  translation -15 0.3 0.02
+  rotation 0 0 1 0.105
+  width 16.5
+  rightBorder FALSE
+  leftBorder FALSE
+  length 140
+}
+Warehouse {
+  translation 22.0473 -12.6792 0
+  rotation 0 0 1 1.671
+}
+Warehouse {
+  translation 61.8844 -8.67468 0
+  rotation 0 0 1 1.671
+  name "warehouse(1)"
+}
+Pedestrian {
+  hidden translation_2 -0.07532745408781498 -5.551115123125783e-17 0.011303822809763359
+  hidden rotation_2 0 1 0 0.40306818181818066
+  hidden translation_3 -0.03950561067589838 0 0.008487337151515145
+  hidden rotation_3 0 -1 0 0.4132045454545449
+  hidden translation_4 -0.021059457264540633 5.551115123125783e-17 0.0013901738983421175
+  hidden rotation_4 0 -1 0 0.056795454545457306
+  hidden translation_5 0.07258123315387523 -5.551115123125783e-17 0.018593057518706962
+  hidden rotation_5 0 -1 0 0.3963863636363629
+  hidden translation_6 -0.00486575247433034 0 0.002008611829572654
+  hidden rotation_6 0 -1 0 0.05345454545454303
+  hidden translation_7 0.029423221712241904 0 -0.003974524787938638
+  hidden rotation_7 0 1 0 0.07990909090908983
+  hidden translation_8 -0.10020734218924879 2.7755575615628914e-17 -0.003394072974752138
+  hidden rotation_8 0 -1 0 0.332818181818181
+  hidden translation_9 0.39871945433593514 0 -0.13174875290700927
+  hidden rotation_9 0 1 0 0.5593636363636348
+  hidden translation_11 -0.1897723460471993 0 -0.03700143658278665
+  hidden rotation_11 0 -1 0 0.6502272727272731
+  hidden translation_12 0.7286644357585853 -2.7755575615628914e-17 -0.7058864719768944
+  hidden rotation_12 0 1 0 1.460136363636364
+  hidden translation_13 0.0812581091715274 0 -0.009287826659982068
+  hidden rotation_13 0 1 0 0.06999999999999902
+  hidden translation_14 -0.05515497753509648 0 0.005644639256671524
+  hidden rotation_14 0 1 0 0.1499318181818188
+  translation 3.1142181399203617 -0.6142181399203617 1.2700454545454547
+  rotation 0 0 1 2.356194490192345
+  controllerArgs [
+    "--speed=0.75"
+    "--trajectory= 2.5 0, 5 2.5, 7.5 0, 5 -2.5"
+  ]
+  rightLegAngle -0.6502272727272733
+  rightLowerLegAngle 1.460136363636364
+  rightFootAngle 0.07
+  leftLegAngle -0.33281818181818074
+  leftLowerLegAngle 0.559363636363635
+  rightArmAngle -0.39638636363636304
+  rightLowerArmAngle -0.05345454545454573
+  rightHandAngle 0.07990909090909071
+  leftArmAngle 0.4030681818181812
+  leftLowerArmAngle -0.41320454545454516
+  leftHandAngle -0.056795454545454836
+  headAngle 0.14993181818181803
+}
+Table {
+  translation 0 0.92 0
+}
+AdvertisingBoard {
+  translation 13.1012 17.8267 0
+  rotation 0 0 1 -1.469
+  frontTexture [
+    "../../../../../Tools/autotest/web-firmware/images/logo.png"
+  ]
+  backTexture [
+    "../../../../../Tools/autotest/web-firmware/images/logo.png"
+  ]
+  displayWidth 16.28
+  displayHeight 6
+  poleNumber 2
+  poleType "H-shape"
+  poleHeight 10
+}
+Iris {
+  hidden linearVelocity_0 -7.932126443029503e-19 1.203227833535197e-18 -1.5641476499159676e-14
+  hidden angularVelocity_0 -6.964162678904245e-31 -7.623849096138463e-18 1.2618824049249151e-18
+  translation 0.0702495 1.45039 0.7949632125000001
+  rotation -6.697092066101539e-18 1.349906519976869e-17 -1 0.5235953071795861
+  controller "ardupilot_vehicle_controller"
+  controllerArgs [
+    "--motors"
+    "m1_motor, m2_motor, m3_motor, m4_motor"
+    "--rangefinder"
+    "range-finder"
+    "--rangefinder-port"
+    "5599"
+  ]
+  extensionSlot [
+    RangeFinder {
+      translation 0.1 0 0
+      fieldOfView 1.57
+      width 640
+      height 480
+      maxRange 20
+    }
+  ]
+}

@@ -1,0 +1,262 @@
+# VRML_SIM R2022b utf8
+# KRTI 2026 Competition 60cm Drone Model (2.0kg Mass, Symmetric Quad-X Geometry)
+# Calibrated for ArduPilot SITL High-Speed Autonomous Flight
+
+PROTO KRTIDrone [
+  field  SFVec3f     translation     0 0 0
+  field  SFRotation  rotation        0 0 1 0
+  field  SFString    name            "KRTIDrone"
+  field  SFString    controller      "void"
+  field  MFString    controllerArgs  []
+  field  SFString    customData      ""
+  field  SFBool      supervisor      FALSE
+  field  SFBool      synchronization TRUE
+  field  MFNode      extensionSlot   []
+]
+{
+  Robot {
+    translation IS translation
+    rotation IS rotation
+    controller IS controller
+    controllerArgs IS controllerArgs
+    customData IS customData
+    supervisor IS supervisor
+    synchronization IS synchronization
+    name IS name
+    children [
+      Group {
+        children IS extensionSlot
+      }
+      DEF IRIS_MESH Shape {
+        appearance PBRAppearance {
+          baseColor 0.08 0.08 0.08
+          roughness 0.8
+          metalness 0.3
+        }
+        geometry Mesh {
+          url "meshes/iris.dae"
+        }
+        castShadows FALSE
+      }
+
+      # -----------------------------------------------------------------------
+      # Motor 1: Front-Right (+X, -Y) — CCW Propeller
+      # -----------------------------------------------------------------------
+      Propeller {
+        shaftAxis 0 0 1
+        centerOfThrust 0.195000 -0.195000 0.025000
+        thrustConstants 0.0016 0
+        torqueConstants 5.0e-04 0
+        device RotationalMotor {
+          name "m1_motor"
+          maxVelocity 100
+          maxTorque 40
+          multiplier 1
+        }
+        slowHelix Solid {
+          translation 0.195000 -0.195000 0.025000
+          children [
+            Shape {
+              appearance DEF PROP_BLUE PBRAppearance {
+                baseColor 0 0.4 0.9
+                metalness 0.2
+              }
+              geometry DEF CCW_PROP Mesh {
+                url "meshes/iris_prop_ccw.dae"
+              }
+            }
+          ]
+        }
+      }
+
+      # -----------------------------------------------------------------------
+      # Motor 2: Rear-Left (-X, +Y) — CCW Propeller
+      # -----------------------------------------------------------------------
+      Propeller {
+        shaftAxis 0 0 1
+        centerOfThrust -0.195000 0.195000 0.025000
+        thrustConstants 0.0016 0
+        torqueConstants 5.0e-04 0
+        device RotationalMotor {
+          name "m2_motor"
+          maxVelocity 100
+          maxTorque 40
+          multiplier 1
+        }
+        slowHelix Solid {
+          translation -0.195000 0.195000 0.025000
+          children [
+            Shape {
+              appearance DEF PROP_BLACK PBRAppearance {
+                baseColor 0.05 0.05 0.05
+                metalness 0.2
+              }
+              geometry USE CCW_PROP
+            }
+          ]
+        }
+      }
+
+      # -----------------------------------------------------------------------
+      # Motor 3: Front-Left (+X, +Y) — CW Propeller
+      # -----------------------------------------------------------------------
+      Propeller {
+        shaftAxis 0 0 1
+        centerOfThrust 0.195000 0.195000 0.025000
+        thrustConstants -0.0016 0
+        torqueConstants 5.0e-04 0
+        device RotationalMotor {
+          name "m3_motor"
+          maxVelocity 100
+          maxTorque 40
+          multiplier -1
+        }
+        slowHelix Solid {
+          translation 0.195000 0.195000 0.025000
+          children [
+            Shape {
+              appearance USE PROP_BLUE
+              geometry DEF CW_PROP Mesh {
+                url "meshes/iris_prop_cw.dae"
+              }
+            }
+          ]
+        }
+      }
+
+      # -----------------------------------------------------------------------
+      # Motor 4: Rear-Right (-X, -Y) — CW Propeller
+      # -----------------------------------------------------------------------
+      Propeller {
+        shaftAxis 0 0 1
+        centerOfThrust -0.195000 -0.195000 0.025000
+        thrustConstants -0.0016 0
+        torqueConstants 5.0e-04 0
+        device RotationalMotor {
+          name "m4_motor"
+          maxVelocity 100
+          maxTorque 40
+          multiplier -1
+        }
+        slowHelix Solid {
+          translation -0.195000 -0.195000 0.025000
+          children [
+            Shape {
+              appearance USE PROP_BLACK
+              geometry USE CW_PROP
+            }
+          ]
+        }
+      }
+
+      # -----------------------------------------------------------------------
+      # Payload Connector
+      # -----------------------------------------------------------------------
+      Connector {
+        translation 0 0 -0.05
+        rotation 0 1 0 1.57079632679
+        name "connector"
+        model "krti_payload"
+        type "active"
+        isLocked TRUE
+        autoLock TRUE
+        distanceTolerance 0.1
+        axisTolerance 3.14159
+        rotationTolerance 3.14159
+        numberOfRotations 0
+        children [
+          DEF CONNECTOR_SHAPE Shape {
+            appearance PBRAppearance {
+              baseColor 0.2 0.2 0.2
+              roughness 0.5
+              metalness 0.8
+            }
+            geometry Cylinder {
+              height 0.01
+              radius 0.02
+            }
+          }
+        ]
+      }
+
+      # -----------------------------------------------------------------------
+      # Landing Legs (Under Propellers)
+      # -----------------------------------------------------------------------
+      DEF LANDING_LEGS Group {
+        children [
+          # Front-Right Leg (Motor 1)
+          Pose {
+            translation 0.195 -0.195 -0.04
+            children [
+              DEF LEG_SHAPE Shape {
+                appearance PBRAppearance {
+                  baseColor 0.1 0.1 0.1
+                  roughness 0.5
+                  metalness 0.8
+                }
+                geometry Cylinder {
+                  height 0.12
+                  radius 0.008
+                }
+              }
+            ]
+          }
+          # Rear-Left Leg (Motor 2)
+          Pose {
+            translation -0.195 0.195 -0.04
+            children [ USE LEG_SHAPE ]
+          }
+          # Front-Left Leg (Motor 3)
+          Pose {
+            translation 0.195 0.195 -0.04
+            children [ USE LEG_SHAPE ]
+          }
+          # Rear-Right Leg (Motor 4)
+          Pose {
+            translation -0.195 -0.195 -0.04
+            children [ USE LEG_SHAPE ]
+          }
+        ]
+      }
+
+      Accelerometer {}
+      GPS {}
+      Gyro {}
+      InertialUnit {}
+    ]
+    boundingObject Group {
+      children [
+        # Main Body Collision
+        Box {
+          size 0.550000 0.550000 0.120000
+        }
+        # Landing Leg Collisions
+        Pose {
+          translation 0.195 -0.195 -0.04
+          children [ Cylinder { height 0.12 radius 0.008 } ]
+        }
+        Pose {
+          translation -0.195 0.195 -0.04
+          children [ Cylinder { height 0.12 radius 0.008 } ]
+        }
+        Pose {
+          translation 0.195 0.195 -0.04
+          children [ Cylinder { height 0.12 radius 0.008 } ]
+        }
+        Pose {
+          translation -0.195 -0.195 -0.04
+          children [ Cylinder { height 0.12 radius 0.008 } ]
+        }
+      ]
+    }
+    physics Physics {
+      density -1
+      mass 2.000000
+      centerOfMass [ 0.000000 0.000000 0.000000 ]
+      inertiaMatrix [
+        0.025000 0.025000 0.045000
+        0.000000 0.000000 0.000000
+      ]
+    }
+  }
+}

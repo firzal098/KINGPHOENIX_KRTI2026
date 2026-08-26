@@ -1,0 +1,41 @@
+# ArduPilot Parameter File for KRTI Drone (F450 Multirotor in JSBSim / Webots SITL)
+
+# Frame Configuration (Quad-X)
+FRAME_CLASS      1          # Multirotor
+FRAME_TYPE       1          # X-Quad (1:FR, 2:AL, 3:FL, 4:AR)
+
+# Loop Rate matching Simulator Clock (120 Hz)
+SCHED_LOOP_RATE  120        # Fixes "Main loop slow (120Hz < 300Hz)" arming error
+
+# Attitude & Rate PIDs (Angle & Rate Stability)
+ATC_ANG_PIT_P    4.5
+ATC_ANG_RLL_P    4.5
+ATC_ANG_YAW_P    3.0
+
+ATC_RAT_PIT_P    0.08
+ATC_RAT_RLL_P    0.08
+ATC_RAT_YAW_P    0.05
+
+ATC_RAT_PIT_I    0.08
+ATC_RAT_RLL_I    0.08
+ATC_RAT_YAW_I    0.02
+
+ATC_RAT_PIT_D    0.002
+ATC_RAT_RLL_D    0.002
+ATC_RAT_YAW_D    0.00001
+
+# Motor Thrust & Scaling
+MOT_THST_EXPO    0          # Linear thrust curve in simulation
+MOT_THST_HOVER   0.25       # Realistic hover thrust with linearized propellers
+MOT_SPIN_ARM     0.10       # Motor idle spin when armed
+MOT_SPIN_MIN     0.15       # Minimum flight thrust
+
+# Navigation & Sensor Fusion (Sim AHRS for clean SITL)
+AHRS_EKF_TYPE    10         # Sim AHRS (Bypasses mag anomaly & compass glitches)
+COMPASS_ENABLE   0          # Disable physical compass in simulator
+COMPASS_USE      0
+INS_GYR_CAL      0          # Skip gyro calibration wait
+
+# Arming Checks
+ARMING_CHECK     0          # Bypass pre-arm checks for autonomous SITL
+ARMING_SKIPCHK   64         # Bypass RC receiver requirement
