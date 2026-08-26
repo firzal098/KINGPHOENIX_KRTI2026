@@ -124,7 +124,11 @@ def generate_launch_description():
         executable='rosbridge_websocket',
         name='rosbridge_websocket',
         output='screen',
-        parameters=[{'port': 9090}]
+        parameters=[{
+            'port': 9090,
+            'max_message_size': 10000000,
+        }],
+        arguments=['--ros-args', '--log-level', 'rosbridge_websocket:=WARN']
     )
 
     # Locate src/gcs directory dynamically

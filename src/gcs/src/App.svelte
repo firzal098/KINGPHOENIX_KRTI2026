@@ -6,6 +6,7 @@
   import ObservationPanel from './lib/components/ObservationPanel.svelte';
   import ActionPanel from './lib/components/ActionPanel.svelte';
   import TelemetryGauges from './lib/components/TelemetryGauges.svelte';
+  import ToastContainer from './lib/components/ToastContainer.svelte';
 
   onMount(() => {
     // Auto-connect to ROSBridge on page mount
@@ -36,6 +37,9 @@
       <ObservationPanel />
     </div>
   </div>
+
+  <!-- Bottom Floating Notification Toast Stack -->
+  <ToastContainer />
 </main>
 
 <style>

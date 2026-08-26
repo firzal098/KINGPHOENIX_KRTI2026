@@ -96,6 +96,31 @@ public:
         RCLCPP_INFO(this->get_logger(), "ArduPilot MAVROS Controller Node Started (50 Hz). Initial state: OFF.");
     }
 
+    std::string getFSMStateString(FSMState state) const
+    {
+        switch (state) {
+            case FSMState::OFF: return "OFF";
+            case FSMState::WAIT_FOR_FCU_CONNECT: return "WAIT_FOR_FCU_CONNECT";
+            case FSMState::SET_MODE_GUIDED: return "SET_MODE_GUIDED";
+            case FSMState::ARMING: return "ARMING";
+            case FSMState::TAKEOFF: return "TAKEOFF";
+            case FSMState::CLIMBING: return "CLIMBING";
+            case FSMState::HOVER: return "HOVER";
+            case FSMState::RUN: return "RUN";
+            case FSMState::LANDING: return "LANDING";
+            default: return "UNKNOWN";
+        }
+    }
+
+    void publishCurrentState()
+    {
+        if (current_state_pub_) {
+            std_msgs::msg::String msg;
+            msg.data = getFSMStateString(current_fsm_state_);
+            current_state_pub_->publish(msg);
+        }
+    }
+
     bool changeState(const std::string & target_state)
     {
         std::string state_upper = target_state;
@@ -120,16 +145,19 @@ public:
                     requestForceDisarm();
                 }
             }
+            publishCurrentState();
             return true;
         }
         else if (state_upper == "HOVER") {
             if (current_fsm_state_ == FSMState::OFF || current_fsm_state_ == FSMState::LANDING) {
                 RCLCPP_INFO(this->get_logger(), "State change request 'HOVER': Initiating takeoff sequence towards HOVER.");
                 current_fsm_state_ = FSMState::WAIT_FOR_FCU_CONNECT;
+                publishCurrentState();
                 return true;
             } else {
                 RCLCPP_INFO(this->get_logger(), "Transitioning to / remaining in HOVER mode.");
                 current_fsm_state_ = FSMState::HOVER;
+                publishCurrentState();
                 return true;
             }
         }
@@ -137,6 +165,7 @@ public:
             if (current_fsm_state_ == FSMState::HOVER) {
                 RCLCPP_INFO(this->get_logger(), "State change request 'RUN': Switching from HOVER to RUN.");
                 current_fsm_state_ = FSMState::RUN;
+                publishCurrentState();
                 return true;
             } else if (current_fsm_state_ == FSMState::OFF || current_fsm_state_ == FSMState::LANDING) {
                 RCLCPP_WARN(this->get_logger(), "Cannot transition to 'RUN' directly from OFF/LANDING. Takeoff to HOVER first.");
@@ -144,6 +173,7 @@ public:
             } else {
                 RCLCPP_INFO(this->get_logger(), "Already in or transitioning to RUN mode.");
                 current_fsm_state_ = FSMState::RUN;
+                publishCurrentState();
                 return true;
             }
         }
@@ -179,6 +209,12 @@ private:
     void fsmLoop()
     {
         rclcpp::Time current_time = this->now();
+
+        // Periodically broadcast current state telemetry (10 Hz)
+        if ((current_time - last_state_pub_time_).seconds() >= 0.1) {
+            publishCurrentState();
+            last_state_pub_time_ = current_time;
+        }
 
         switch (current_fsm_state_) {
             case FSMState::OFF: {
@@ -242,11 +278,26 @@ private:
                     this->get_logger(), *this->get_clock(), 500,
                     "Climbing... Target: %.2fm, Current: %.2fm", target_altitude_, current_alt);
 
+                // If drone hasn't lifted off (< 0.15m) after 2.5s, re-trigger arming & takeoff
+                if (current_alt < 0.15 && (current_time - last_request_time_).seconds() > 2.5) {
+                    if (!current_mavros_state_.armed) {
+                        RCLCPP_WARN(this->get_logger(), "Drone not armed in CLIMBING. Sending force arm.");
+                        requestForceArm();
+                    }
+                    if (current_mavros_state_.mode != "GUIDED") {
+                        requestSetMode("GUIDED");
+                    }
+                    RCLCPP_INFO(this->get_logger(), "Re-sending takeoff command...");
+                    requestTakeoff(static_cast<float>(target_altitude_));
+                    last_request_time_ = current_time;
+                }
+
                 if (current_alt >= (target_altitude_ - altitude_tolerance_)) {
                     RCLCPP_INFO(this->get_logger(), "Target altitude reached (%.2fm). Transitioning to HOVER.", current_alt);
                     hover_pose_ = current_pose_;
                     hover_pose_.pose.position.z = target_altitude_;
                     current_fsm_state_ = FSMState::HOVER;
+                    publishCurrentState();
                 }
                 break;
             }
@@ -405,10 +456,47 @@ private:
             });
     }
 
+    void requestForceArm()
+    {
+        if (!command_client_->service_is_ready()) {
+            RCLCPP_WARN(this->get_logger(), "Command service unavailable for force arm. Attempting standard arm.");
+            requestArming(true);
+            return;
+        }
+
+        auto request = std::make_shared<mavros_msgs::srv::CommandLong::Request>();
+        request->broadcast = false;
+        request->command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+        request->confirmation = 0;
+        request->param1 = 1.0f;     // 1 = Arm
+        request->param2 = 21196.0f; // ArduPilot force arm (ARMING_CHECK_FORCE)
+        request->param3 = 0.0f;
+        request->param4 = 0.0f;
+        request->param5 = 0.0f;
+        request->param6 = 0.0f;
+        request->param7 = 0.0f;
+
+        command_client_->async_send_request(
+            request,
+            [this](rclcpp::Client<mavros_msgs::srv::CommandLong>::SharedFuture future) {
+                try {
+                    auto response = future.get();
+                    if (response->success) {
+                        RCLCPP_INFO(this->get_logger(), "Force arm executed successfully.");
+                    } else {
+                        RCLCPP_WARN(this->get_logger(), "Force arm returned result code: %d", response->result);
+                    }
+                } catch (const std::exception & e) {
+                    RCLCPP_ERROR(this->get_logger(), "Force arm service call failed: %s", e.what());
+                }
+            });
+    }
+
     void requestArming(bool arm)
     {
         if (!arming_client_->service_is_ready()) {
             RCLCPP_WARN(this->get_logger(), "Arming service unavailable.");
+            if (arm) requestForceArm();
             return;
         }
 
@@ -427,12 +515,17 @@ private:
                         if (!arm) {
                             RCLCPP_INFO(this->get_logger(), "Falling back to force disarm.");
                             requestForceDisarm();
+                        } else {
+                            RCLCPP_INFO(this->get_logger(), "Falling back to force arm.");
+                            requestForceArm();
                         }
                     }
                 } catch (const std::exception & e) {
                     RCLCPP_ERROR(this->get_logger(), "Arming service call failed: %s", e.what());
                     if (!arm) {
                         requestForceDisarm();
+                    } else {
+                        requestForceArm();
                     }
                 }
             });
@@ -476,6 +569,7 @@ private:
     double target_altitude_;
     double altitude_tolerance_;
     rclcpp::Time last_request_time_;
+    rclcpp::Time last_state_pub_time_;
 
     Policy policy_;
 
@@ -484,6 +578,7 @@ private:
     
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr local_pos_pub_;
     rclcpp::Publisher<mavros_msgs::msg::PositionTarget>::SharedPtr local_raw_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr current_state_pub_;
 
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
     rclcpp::Client<mavros_msgs::srv::CommandLong>::SharedPtr command_client_;

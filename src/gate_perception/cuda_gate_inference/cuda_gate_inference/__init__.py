@@ -17,7 +17,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from ament_index_python.packages import get_package_share_directory
 
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CompressedImage, CameraInfo
 from geometry_msgs.msg import PoseArray, PoseStamped, Pose, Point, Quaternion
 
 try:
@@ -168,6 +168,9 @@ class GatePerceptionNode(Node):
         if self.publish_debug:
             self.pub_debug_img = self.create_publisher(
                 Image, '/perception/debug_image', 10
+            )
+            self.pub_debug_compressed = self.create_publisher(
+                CompressedImage, '/perception/debug_image/compressed', 10
             )
 
         self.get_logger().info(f"Gate Perception Node initialized using ONNX model: {self.model_path}")
@@ -351,8 +354,10 @@ class GatePerceptionNode(Node):
             self.pub_primary_pose.publish(primary_pose_msg)
 
         # Gate debug drawing and publication: only execute if subscribers exist
-        if self.publish_debug and self.pub_debug_img.get_subscription_count() > 0:
-            self.publish_debug_overlay(frame, detections, msg.header)
+        has_img_subs = self.pub_debug_img.get_subscription_count() > 0
+        has_compressed_subs = self.pub_debug_compressed.get_subscription_count() > 0
+        if self.publish_debug and (has_img_subs or has_compressed_subs):
+            self.publish_debug_overlay(frame, detections, msg.header, has_img_subs, has_compressed_subs)
 
     def publish_empty_results(self, header):
         if self.pub_detections_2d is not None and HAS_VISION_MSGS:
@@ -364,7 +369,7 @@ class GatePerceptionNode(Node):
         pose_msg.header = header
         self.pub_poses_3d.publish(pose_msg)
 
-    def publish_debug_overlay(self, frame, detections, header):
+    def publish_debug_overlay(self, frame, detections, header, publish_raw=True, publish_compressed=True):
         vis_img = frame.copy()
         for det in detections:
             cx, cy, w, h = det['bbox']
@@ -387,16 +392,27 @@ class GatePerceptionNode(Node):
                     color = (0, 0, 255) if 6 <= i <= 9 else (255, 250, 0)
                     cv2.circle(vis_img, (kx, ky), 4, color, -1)
 
-        debug_msg = Image()
-        debug_msg.header = header
-        debug_msg.height = vis_img.shape[0]
-        debug_msg.width = vis_img.shape[1]
-        debug_msg.encoding = "bgr8"
-        debug_msg.is_bigendian = 0
-        debug_msg.step = vis_img.shape[1] * 3
-        debug_msg.data = vis_img.tobytes()
+        # 1. Raw Image
+        if publish_raw:
+            debug_msg = Image()
+            debug_msg.header = header
+            debug_msg.height = vis_img.shape[0]
+            debug_msg.width = vis_img.shape[1]
+            debug_msg.encoding = "bgr8"
+            debug_msg.is_bigendian = 0
+            debug_msg.step = vis_img.shape[1] * 3
+            debug_msg.data = vis_img.tobytes()
+            self.pub_debug_img.publish(debug_msg)
 
-        self.pub_debug_img.publish(debug_msg)
+        # 2. Compressed JPEG Image (fast web streaming for GCS)
+        if publish_compressed:
+            compressed_msg = CompressedImage()
+            compressed_msg.header = header
+            compressed_msg.format = "jpeg"
+            ret, jpeg_buf = cv2.imencode('.jpg', vis_img, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+            if ret:
+                compressed_msg.data = jpeg_buf.tobytes()
+                self.pub_debug_compressed.publish(compressed_msg)
 
 
 def main(args=None):
