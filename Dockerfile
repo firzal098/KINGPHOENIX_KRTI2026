@@ -82,10 +82,13 @@ ENV GSCAM_CONFIG="udpsrc port=5599 caps=\"image/jpeg\" ! jpegdec ! videoconvert"
 COPY ros_entrypoint.sh /ros_entrypoint.sh
 RUN chmod +x /ros_entrypoint.sh
 
-# Install Foxglove Bridge + vision_msgs
+# Install Foxglove Bridge, ROSBridge Suite, vision_msgs, Node.js, and npm
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-${ROS_DISTRO}-foxglove-bridge \
+    ros-${ROS_DISTRO}-rosbridge-suite \
     ros-${ROS_DISTRO}-vision-msgs \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -126,6 +129,29 @@ RUN if [ "$INSTALL_CUDA" = "true" ]; then \
 fi
 
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda-13.3/lib64:/usr/local/cuda-13.3/targets/x86_64-linux/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+
+
+# ── ONNX Runtime C++ Installation ──────────────────────────────────────────
+ARG ONNXRUNTIME_VERSION=1.18.0
+ARG ONNXRUNTIME_ARCH=auto
+
+RUN ARCH=$(uname -m) && \
+    if [ "$ONNXRUNTIME_ARCH" != "auto" ]; then \
+        ORT_ARCH="$ONNXRUNTIME_ARCH"; \
+    elif [ "$ARCH" = "x86_64" ]; then \
+        ORT_ARCH="x64"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
+        ORT_ARCH="aarch64"; \
+    else \
+        echo "Unsupported architecture: $ARCH" && exit 1; \
+    fi && \
+    echo "Installing ONNX Runtime v${ONNXRUNTIME_VERSION} for ${ORT_ARCH}..." && \
+    wget -q https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-${ORT_ARCH}-${ONNXRUNTIME_VERSION}.tgz -O /tmp/ort.tgz && \
+    tar -xzf /tmp/ort.tgz -C /tmp && \
+    cp -r /tmp/onnxruntime-linux-${ORT_ARCH}-${ONNXRUNTIME_VERSION}/include/* /usr/local/include/ && \
+    cp -r /tmp/onnxruntime-linux-${ORT_ARCH}-${ONNXRUNTIME_VERSION}/lib/* /usr/local/lib/ && \
+    ldconfig && \
+    rm -rf /tmp/ort.tgz /tmp/onnxruntime-linux-${ORT_ARCH}-${ONNXRUNTIME_VERSION}
 
 ENTRYPOINT ["/ros_entrypoint.sh"]
 CMD ["bash"]

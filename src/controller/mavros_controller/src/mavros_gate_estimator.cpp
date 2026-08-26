@@ -3,6 +3,7 @@
 #include <vector>
 #include <cmath>
 #include <limits>
+#include <chrono>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 
@@ -34,41 +35,39 @@ struct GateState {
 
 class MavrosGateEstimator : public rclcpp::Node {
 public:
-    MavrosGateEstimator() : Node("mavros_gate_estimator"), drone_pose_received_(false), initial_pose_captured_(false) {
-        // Declare tunable parameters
+    MavrosGateEstimator() 
+    : Node("mavros_gate_estimator"), 
+      drone_pose_received_(false), 
+      initial_pose_captured_(false) 
+    {
+        // Declare parameters with default double values
         this->declare_parameter<double>("gate_prior_sigma", 1.5);
         this->declare_parameter<double>("drone_pose_sigma", 2.0);
         this->declare_parameter<double>("pnp_vision_sigma", 4.0);
         this->declare_parameter<double>("association_max_dist", 6.0);
-        
-        // Chi-squared 3 DOF gating threshold (11.345 = 99% confidence interval)
         this->declare_parameter<double>("mahalanobis_thresh_sq", 11.345);
-
-        // New parameter: Toggle publishing unrefined static initial gate poses
         this->declare_parameter<bool>("publish_initial_pos", true);
 
-        prior_sigma_         = this->get_parameter("gate_prior_sigma").as_double();
-        drone_sigma_         = this->get_parameter("drone_pose_sigma").as_double();
-        pnp_sigma_           = this->get_parameter("pnp_vision_sigma").as_double();
-        max_dist_            = this->get_parameter("association_max_dist").as_double();
-        mahalanobis_max_sq_  = this->get_parameter("mahalanobis_thresh_sq").as_double();
+        // Safe parameter reading (handles int or double from launch files without crashing)
+        prior_sigma_         = get_param_as_double("gate_prior_sigma", 1.5);
+        drone_sigma_         = get_param_as_double("drone_pose_sigma", 2.0);
+        pnp_sigma_           = get_param_as_double("pnp_vision_sigma", 4.0);
+        max_dist_            = get_param_as_double("association_max_dist", 6.0);
+        mahalanobis_max_sq_  = get_param_as_double("mahalanobis_thresh_sq", 11.345);
         publish_initial_pos_ = this->get_parameter("publish_initial_pos").as_bool();
 
         // Initialize zero offset defaults until first MAVROS pose is received
         initial_drone_pos_ = Eigen::Vector3d::Zero();
         initial_drone_rot_ = Eigen::Quaterniond::Identity();
 
-        // Initialize default gate priors
+        // Initialize default gate priors at origin
         initialize_gate_priors();
 
         // Define Camera Optical (RDF) to Drone Body (FLU) rotation matrix
-        // FLU: +X Forward, +Y Left, +Z Up
-        // RDF: +X Right, +Y Down, +Z Forward (Depth)
         R_cam_to_body_ <<  0.0,  0.0,  1.0,
                           -1.0,  0.0,  0.0,
                            0.0, -1.0,  0.0;
 
-        // Use SensorDataQoS (Best Effort Reliability) to match MAVROS & Perception node publishers
         auto sensor_qos = rclcpp::SensorDataQoS();
 
         // Subscribers
@@ -107,20 +106,49 @@ public:
             std::bind(&MavrosGateEstimator::handle_reset_service, this, std::placeholders::_1, std::placeholders::_2)
         );
 
+        // 30 Hz wall timer (33,333 microseconds)
+        pub_timer_ = this->create_wall_timer(
+            std::chrono::microseconds(33333),
+            std::bind(&MavrosGateEstimator::timer_callback, this)
+        );
+
         RCLCPP_INFO(
             this->get_logger(),
-            "MAVROS Gate Estimator Node Initialized (Mahalanobis Threshold Sq: %.3f, Publish Initial Poses: %s).",
-            mahalanobis_max_sq_, publish_initial_pos_ ? "ENABLED" : "DISABLED"
+            "MAVROS Gate Estimator Node Initialized (30 Hz streaming, Max Dist: %.1fm, Mahalanobis Sq: %.3f).",
+            max_dist_, mahalanobis_max_sq_
         );
     }
 
 private:
+    double get_param_as_double(const std::string &name, double default_val) {
+        if (!this->has_parameter(name)) return default_val;
+        auto param = this->get_parameter(name);
+        if (param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
+            return static_cast<double>(param.as_int());
+        } else if (param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+            return param.as_double();
+        }
+        return default_val;
+    }
+
+    void timer_callback() {
+        std_msgs::msg::Header header;
+        header.stamp = this->now();
+        header.frame_id = "map";
+
+        publish_refined_poses(header);
+        publish_rviz_markers(header);
+
+        if (publish_initial_pos_) {
+            publish_initial_poses(header);
+        }
+    }
+
     void initialize_gate_priors() {
         gates_.clear();
         initial_poses_msg_.poses.clear();
         initial_markers_msg_.markers.clear();
 
-        // Raw gate priors provided in RDF relative to drone initialization point
         std::vector<GatePriorRDF> priors_rdf = {
             {1,  0.41, -0.75, 29.33,  0.0, 0.0, 1.0},
             {2,  5.46, -0.75, 19.31,  0.0, 0.0, 1.0},
@@ -135,27 +163,18 @@ private:
             GateState state;
             state.id = p.id;
 
-            // Raw conversion from RDF relative to drone body ENU frame:
-            // X_rel_enu = Z_rdf (Forward)
-            // Y_rel_enu = -X_rdf (Left)
-            // Z_rel_enu = -Y_rdf (Up)
             Eigen::Vector3d rel_pos_enu(p.z_rdf, -p.x_rdf, -p.y_rdf);
             Eigen::Vector3d rel_norm_enu(p.nz_rdf, -p.nx_rdf, -p.ny_rdf);
 
-            // Add captured initial drone pose offset to anchor ENU gate positions
             state.position_enu = initial_drone_pos_ + (initial_drone_rot_ * rel_pos_enu);
             state.normal_enu   = (initial_drone_rot_ * rel_norm_enu).normalized();
+            state.covariance   = Eigen::Matrix3d::Identity() * initial_var;
 
-            // Initial 3x3 diagonal covariance matrix P_0
-            state.covariance = Eigen::Matrix3d::Identity() * initial_var;
-
-            // Calculate rotation quaternion orienting the gate's normal vector in ENU
             Eigen::Vector3d default_facing(1.0, 0.0, 0.0);
             state.orientation = Eigen::Quaterniond::FromTwoVectors(default_facing, state.normal_enu);
 
             gates_.push_back(state);
 
-            // Construct static Pose message for initial unrefined position
             geometry_msgs::msg::Pose initial_pose;
             initial_pose.position.x = state.position_enu.x();
             initial_pose.position.y = state.position_enu.y();
@@ -166,7 +185,6 @@ private:
             initial_pose.orientation.w = state.orientation.w();
             initial_poses_msg_.poses.push_back(initial_pose);
 
-            // Construct static visual Marker message (Amber/Orange) for initial unrefined position
             visualization_msgs::msg::Marker init_box;
             init_box.ns = "initial_gate_boxes";
             init_box.id = state.id;
@@ -176,7 +194,7 @@ private:
             init_box.scale.x = 0.08;
             init_box.scale.y = 2.0;
             init_box.scale.z = 2.0;
-            init_box.color.r = 1.0f; // Orange / Amber color for unrefined priors
+            init_box.color.r = 1.0f;
             init_box.color.g = 0.5f;
             init_box.color.b = 0.0f;
             init_box.color.a = 0.4f;
@@ -197,13 +215,6 @@ private:
             init_text.color.a = 0.8f;
             init_text.text = "Gate " + std::to_string(state.id) + " (Initial)";
             initial_markers_msg_.markers.push_back(init_text);
-
-            RCLCPP_INFO(
-                this->get_logger(),
-                "Initialized Gate %d -> Anchored ENU Pos: [%.2f, %.2f, %.2f], Normal: [%.2f, %.2f, %.2f]",
-                state.id, state.position_enu.x(), state.position_enu.y(), state.position_enu.z(),
-                state.normal_enu.x(), state.normal_enu.y(), state.normal_enu.z()
-            );
         }
     }
 
@@ -233,7 +244,6 @@ private:
 
         drone_pose_received_ = true;
 
-        // Capture first received MAVROS pose as reference offset point and re-anchor gate priors
         if (!initial_pose_captured_) {
             initial_drone_pos_ = latest_drone_pos_;
             initial_drone_rot_ = latest_drone_rot_;
@@ -261,16 +271,10 @@ private:
         const Eigen::Matrix3d R_drone = latest_drone_rot_.toRotationMatrix();
         const Eigen::Matrix3d R_total = R_drone * R_cam_to_body_;
 
-        // Camera PnP covariance in optical frame
         const Eigen::Matrix3d R_pnp_cam = Eigen::Matrix3d::Identity() * (pnp_sigma_ * pnp_sigma_);
-        
-        // Transform PnP covariance to world ENU frame: R_world = R_total * R_pnp_cam * R_total^T
         const Eigen::Matrix3d R_pnp_world = R_total * R_pnp_cam * R_total.transpose();
-        
-        // Drone position uncertainty covariance
         const Eigen::Matrix3d R_drone_pos = Eigen::Matrix3d::Identity() * (drone_sigma_ * drone_sigma_);
 
-        // Total measurement error covariance R_meas
         const Eigen::Matrix3d R_meas = R_pnp_world + R_drone_pos;
 
         for (const auto &pnp_pose : msg->poses) {
@@ -282,17 +286,15 @@ private:
             // Data Association using Mahalanobis Distance
             int best_idx = -1;
             double min_mahalanobis_sq = std::numeric_limits<double>::max();
-            double corresponding_euc_dist = 0.0;
+            [[maybe_unused]] double corresponding_euc_dist = 0.0;
 
             for (size_t i = 0; i < gates_.size(); ++i) {
-                Eigen::Vector3d y = z_meas - gates_[i].position_enu;    // Innovation residual
-                Eigen::Matrix3d S = gates_[i].covariance + R_meas;       // Innovation covariance
+                Eigen::Vector3d y = z_meas - gates_[i].position_enu;
+                Eigen::Matrix3d S = gates_[i].covariance + R_meas;
                 
-                // Mahalanobis distance squared: D_M^2 = y^T * S^-1 * y
                 double m_dist_sq = y.transpose() * S.inverse() * y;
                 double euc_dist  = y.norm();
 
-                // Check Euclidean max distance fallback as well
                 if (m_dist_sq < min_mahalanobis_sq && euc_dist <= max_dist_) {
                     min_mahalanobis_sq = m_dist_sq;
                     corresponding_euc_dist = euc_dist;
@@ -300,49 +302,25 @@ private:
                 }
             }
 
-            // Perform Kalman update if measurement falls within Chi-Square Mahalanobis threshold
             if (best_idx != -1 && min_mahalanobis_sq <= mahalanobis_max_sq_) {
                 update_gate_kalman(gates_[best_idx], z_meas, R_meas, min_mahalanobis_sq);
-            } else if (best_idx != -1) {
-                RCLCPP_WARN(
-                    this->get_logger(),
-                    "Gate candidate %d rejected by Mahalanobis check (D_M^2 = %.2f > %.2f, Euc Dist = %.2fm)",
-                    gates_[best_idx].id, min_mahalanobis_sq, mahalanobis_max_sq_, corresponding_euc_dist
-                );
             }
-        }
-
-        // Publish updated refined results
-        publish_refined_poses(msg->header);
-        publish_rviz_markers(msg->header);
-
-        // Publish static unrefined initial gate poses if enabled
-        if (publish_initial_pos_) {
-            publish_initial_poses(msg->header);
         }
     }
 
     void update_gate_kalman(GateState &gate, const Eigen::Vector3d &z_meas, const Eigen::Matrix3d &R_meas, [[maybe_unused]] double mahalanobis_sq) {
-        const Eigen::Vector3d y = z_meas - gate.position_enu;    // Innovation residual
-        const Eigen::Matrix3d S = gate.covariance + R_meas;       // Innovation covariance
-        const Eigen::Matrix3d K = gate.covariance * S.inverse(); // Kalman Gain
+        const Eigen::Vector3d y = z_meas - gate.position_enu;
+        const Eigen::Matrix3d S = gate.covariance + R_meas;
+        const Eigen::Matrix3d K = gate.covariance * S.inverse();
 
-        // State & Covariance Update
         gate.position_enu += K * y;
         gate.covariance = (Eigen::Matrix3d::Identity() - K) * gate.covariance;
-
-        // RCLCPP_INFO(
-        //     this->get_logger(),
-        //     "Updated Gate %d -> Refined ENU Pos: [%.2f, %.2f, %.2f], Pos Uncertainty std_x: %.2fm, D_M^2: %.2f",
-        //     gate.id, gate.position_enu.x(), gate.position_enu.y(), gate.position_enu.z(),
-        //     std::sqrt(gate.covariance(0,0)), mahalanobis_sq
-        // );
     }
 
     void publish_refined_poses(const std_msgs::msg::Header &header) {
         geometry_msgs::msg::PoseArray msg;
         msg.header.stamp = header.stamp;
-        msg.header.frame_id = "map"; // Standard ENU world frame
+        msg.header.frame_id = "map";
 
         for (const auto &gate : gates_) {
             geometry_msgs::msg::Pose p;
@@ -379,7 +357,6 @@ private:
         visualization_msgs::msg::MarkerArray array;
 
         for (const auto &gate : gates_) {
-            // Gate Visual Box
             visualization_msgs::msg::Marker box;
             box.header.stamp = header.stamp;
             box.header.frame_id = "map";
@@ -394,16 +371,15 @@ private:
             box.pose.orientation.y = gate.orientation.y();
             box.pose.orientation.z = gate.orientation.z();
             box.pose.orientation.w = gate.orientation.w();
-            box.scale.x = 0.1; // Frame thickness
-            box.scale.y = 2.0; // Gate width
-            box.scale.z = 2.0; // Gate height
+            box.scale.x = 0.1;
+            box.scale.y = 2.0;
+            box.scale.z = 2.0;
             box.color.r = 0.0f;
             box.color.g = 0.8f;
             box.color.b = 1.0f;
             box.color.a = 0.6f;
             array.markers.push_back(box);
 
-            // Gate ID Text
             visualization_msgs::msg::Marker text;
             text.header.stamp = header.stamp;
             text.header.frame_id = "map";
@@ -426,7 +402,7 @@ private:
         pub_markers_->publish(array);
     }
 
-    // Config parameters
+    // Parameters
     double prior_sigma_;
     double drone_sigma_;
     double pnp_sigma_;
@@ -444,7 +420,6 @@ private:
     Eigen::Quaterniond latest_drone_rot_;
     bool drone_pose_received_;
 
-    // Initial offset anchor variables
     Eigen::Vector3d initial_drone_pos_;
     Eigen::Quaterniond initial_drone_rot_;
     bool initial_pose_captured_;
@@ -457,6 +432,7 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_initial_poses_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_initial_markers_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_gates_;
+    rclcpp::TimerBase::SharedPtr pub_timer_;
 };
 
 int main(int argc, char **argv) {

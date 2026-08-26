@@ -6,6 +6,8 @@ services:
       args:
         ROS_DISTRO: jazzy
         INSTALL_CUDA: ${INSTALL_CUDA:-false}
+        ONNXRUNTIME_VERSION: ${ONNXRUNTIME_VERSION:-1.18.0}
+        ONNXRUNTIME_ARCH: ${ONNXRUNTIME_ARCH:-auto}
     container_name: ros_jazzy_container
     stdin_open: true  # Keeps standard in open (-i)
     tty: true         # Allocates a pseudo-TTY (-t)

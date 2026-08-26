@@ -3,7 +3,7 @@
 <package format="3">
   <name>mavros_controller</name>
   <version>0.0.1</version>
-  <description>ROS 2 MAVROS gate pose Kalman filter estimator</description>
+  <description>ROS 2 MAVROS gate pose Kalman filter estimator and policy controller</description>
   <maintainer email="firzalyt@gmail.com">Firzal</maintainer>
   <license>Apache-2.0</license>
 
@@ -11,6 +11,7 @@
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
 
   <depend>rclcpp</depend>
+  <depend>ament_index_cpp</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>std_srvs</depend>

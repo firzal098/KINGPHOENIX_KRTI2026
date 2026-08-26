@@ -11,6 +11,12 @@ if [ -f "/ros_ws/install/setup.bash" ]; then
     source "/ros_ws/install/setup.bash"
 fi
 
+# Auto install GCS dependencies if node_modules is missing
+if [ -f "/ros_ws/src/gcs/package.json" ] && [ ! -d "/ros_ws/src/gcs/node_modules" ]; then
+    echo "[Entrypoint] Initializing GCS dependencies (npm install)..."
+    (cd /ros_ws/src/gcs && npm install --silent)
+fi
+
 # Strip any leading '--' occurrences
 while [ "$1" = "--" ]; do
     shift
