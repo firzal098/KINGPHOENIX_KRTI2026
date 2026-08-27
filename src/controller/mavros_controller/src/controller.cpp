@@ -2,12 +2,15 @@
 #include <memory>
 #include <string>
 #include <algorithm>
+#include <cmath>
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/int32.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <mavros_msgs/msg/state.hpp>
 #include <mavros_msgs/msg/position_target.hpp>
+#include <mavros_msgs/msg/home_position.hpp>
 #include <mavros_msgs/srv/command_bool.hpp>
 #include <mavros_msgs/srv/command_long.hpp>
 #include <mavros_msgs/srv/command_tol.hpp>
@@ -28,6 +31,8 @@ enum class FSMState {
     CLIMBING,
     HOVER,
     RUN,
+    HOME,
+    FREE,
     LANDING
 };
 
@@ -39,10 +44,12 @@ public:
       current_fsm_state_(FSMState::OFF),
       target_altitude_(1.0),
       altitude_tolerance_(0.05),
+      has_home_waypoint_(false),
       last_request_time_(this->now()),
       last_state_pub_time_(this->now())
     {
         auto qos = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
+        auto qos_reliable = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
 
         // Subscriptions
         state_sub_ = this->create_subscription<mavros_msgs::msg::State>(
@@ -53,7 +60,15 @@ public:
             "/mavros/local_position/pose", qos,
             std::bind(&ControllerNode::poseCallback, this, std::placeholders::_1));
 
-        // Publishers for both local position setpoint (HOVER) and local raw setpoint (RUN)
+        home_sub_ = this->create_subscription<mavros_msgs::msg::HomePosition>(
+            "/mavros/home_position/home", qos,
+            std::bind(&ControllerNode::homePositionCallback, this, std::placeholders::_1));
+
+        custom_home_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+            "/controller/home_pose", qos_reliable,
+            std::bind(&ControllerNode::customHomePoseCallback, this, std::placeholders::_1));
+
+        // Publishers for both local position setpoint (HOVER / HOME) and local raw setpoint (RUN)
         local_pos_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
             "/mavros/setpoint_position/local", 10);
             
@@ -63,6 +78,10 @@ public:
         // Publisher for Current FSM State telemetry
         current_state_pub_ = this->create_publisher<std_msgs::msg::String>(
             "/controller/current_state", 10);
+
+        // Publisher for Active Target Gate Index telemetry (0 = Gate #1, 1 = Gate #2, etc.)
+        target_gate_pub_ = this->create_publisher<std_msgs::msg::Int32>(
+            "/controller/target_gate_index", 10);
 
         // Service Clients
         arming_client_ = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
@@ -107,6 +126,8 @@ public:
             case FSMState::CLIMBING: return "CLIMBING";
             case FSMState::HOVER: return "HOVER";
             case FSMState::RUN: return "RUN";
+            case FSMState::HOME: return "HOME";
+            case FSMState::FREE: return "FREE";
             case FSMState::LANDING: return "LANDING";
             default: return "UNKNOWN";
         }
@@ -118,6 +139,12 @@ public:
             std_msgs::msg::String msg;
             msg.data = getFSMStateString(current_fsm_state_);
             current_state_pub_->publish(msg);
+        }
+
+        if (target_gate_pub_) {
+            std_msgs::msg::Int32 gate_msg;
+            gate_msg.data = static_cast<int32_t>(policy_.getTargetGateIndex());
+            target_gate_pub_->publish(gate_msg);
         }
     }
 
@@ -132,6 +159,8 @@ public:
 
             if (!on_ground && (current_fsm_state_ == FSMState::HOVER ||
                                current_fsm_state_ == FSMState::RUN ||
+                               current_fsm_state_ == FSMState::HOME ||
+                               current_fsm_state_ == FSMState::FREE ||
                                current_fsm_state_ == FSMState::CLIMBING ||
                                current_fsm_state_ == FSMState::TAKEOFF))
             {
@@ -156,14 +185,24 @@ public:
                 return true;
             } else {
                 RCLCPP_INFO(this->get_logger(), "Transitioning to / remaining in HOVER mode.");
+                hover_pose_ = current_pose_;
+                if (hover_pose_.pose.position.z < 0.3) {
+                    hover_pose_.pose.position.z = target_altitude_;
+                }
+                if (current_mavros_state_.mode != "GUIDED") {
+                    requestSetMode("GUIDED");
+                }
                 current_fsm_state_ = FSMState::HOVER;
                 publishCurrentState();
                 return true;
             }
         }
         else if (state_upper == "RUN") {
-            if (current_fsm_state_ == FSMState::HOVER) {
-                RCLCPP_INFO(this->get_logger(), "State change request 'RUN': Switching from HOVER to RUN.");
+            if (current_fsm_state_ == FSMState::HOVER || current_fsm_state_ == FSMState::HOME || current_fsm_state_ == FSMState::FREE) {
+                RCLCPP_INFO(this->get_logger(), "State change request 'RUN': Switching to RUN.");
+                if (current_mavros_state_.mode != "GUIDED") {
+                    requestSetMode("GUIDED");
+                }
                 current_fsm_state_ = FSMState::RUN;
                 publishCurrentState();
                 return true;
@@ -177,8 +216,34 @@ public:
                 return true;
             }
         }
+        else if (state_upper == "HOME") {
+            if (!has_home_waypoint_) {
+                RCLCPP_WARN(this->get_logger(), "Cannot transition to 'HOME': No home waypoint available yet.");
+                return false;
+            }
 
-        RCLCPP_WARN(this->get_logger(), "Invalid state request: '%s'. Valid states: 'OFF', 'HOVER', 'RUN'.", target_state.c_str());
+            if (current_fsm_state_ == FSMState::OFF || current_fsm_state_ == FSMState::LANDING) {
+                RCLCPP_WARN(this->get_logger(), "Cannot fly to 'HOME' directly from OFF/LANDING. Takeoff to HOVER first.");
+                return false;
+            }
+
+            RCLCPP_INFO(this->get_logger(), "State change request 'HOME': Flying towards Home Waypoint (x: %.2f, y: %.2f, z: %.2f).",
+                home_pose_.pose.position.x, home_pose_.pose.position.y, home_pose_.pose.position.z);
+            if (current_mavros_state_.mode != "GUIDED") {
+                requestSetMode("GUIDED");
+            }
+            current_fsm_state_ = FSMState::HOME;
+            publishCurrentState();
+            return true;
+        }
+        else if (state_upper == "FREE") {
+            RCLCPP_INFO(this->get_logger(), "State change request 'FREE': Giving full manual/RC control. Automated setpoints & arm/disarm watchdog disabled.");
+            current_fsm_state_ = FSMState::FREE;
+            publishCurrentState();
+            return true;
+        }
+
+        RCLCPP_WARN(this->get_logger(), "Invalid state request: '%s'. Valid states: 'OFF', 'HOVER', 'RUN', 'HOME', 'FREE'.", target_state.c_str());
         return false;
     }
 
@@ -192,7 +257,7 @@ private:
         if (success) {
             response->message = "State change request to '" + request->data + "' successfully accepted.";
         } else {
-            response->message = "Failed to initiate transition to '" + request->data + "'. Allowed values: 'OFF', 'HOVER', 'RUN'.";
+            response->message = "Failed to initiate transition to '" + request->data + "'. Allowed values: 'OFF', 'HOVER', 'RUN', 'HOME', 'FREE'.";
         }
     }
 
@@ -204,6 +269,43 @@ private:
     void poseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
     {
         current_pose_ = *msg;
+        // Auto-capture initial position before takeoff if home waypoint is not yet set
+        if (!has_home_waypoint_ && !current_mavros_state_.armed && current_pose_.pose.position.z < 0.3) {
+            home_pose_ = current_pose_;
+            home_pose_.header.frame_id = "map";
+            home_pose_.pose.position.z = target_altitude_;
+            has_home_waypoint_ = true;
+            RCLCPP_INFO_ONCE(this->get_logger(), "Initial ground position auto-captured as fallback home waypoint: (x: %.2f, y: %.2f, z: %.2f)",
+                home_pose_.pose.position.x, home_pose_.pose.position.y, home_pose_.pose.position.z);
+        }
+    }
+
+    void homePositionCallback(const mavros_msgs::msg::HomePosition::SharedPtr msg)
+    {
+        home_pose_.header = msg->header;
+        home_pose_.header.frame_id = "map";
+        home_pose_.pose.position = msg->position;
+        home_pose_.pose.orientation = msg->orientation;
+        if (home_pose_.pose.position.z < 0.2) {
+            home_pose_.pose.position.z = target_altitude_;
+        }
+        has_home_waypoint_ = true;
+        RCLCPP_INFO_ONCE(this->get_logger(), "MAVROS HomePosition received: (x: %.2f, y: %.2f, z: %.2f)",
+            home_pose_.pose.position.x, home_pose_.pose.position.y, home_pose_.pose.position.z);
+    }
+
+    void customHomePoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+    {
+        home_pose_ = *msg;
+        if (home_pose_.header.frame_id.empty()) {
+            home_pose_.header.frame_id = "map";
+        }
+        if (home_pose_.pose.position.z < 0.2) {
+            home_pose_.pose.position.z = target_altitude_;
+        }
+        has_home_waypoint_ = true;
+        RCLCPP_INFO(this->get_logger(), "Custom home waypoint updated: (x: %.2f, y: %.2f, z: %.2f)",
+            home_pose_.pose.position.x, home_pose_.pose.position.y, home_pose_.pose.position.z);
     }
 
     void fsmLoop()
@@ -338,6 +440,46 @@ private:
                 // Execute policy step and publish PositionTarget setpoint to /mavros/setpoint_raw/local
                 mavros_msgs::msg::PositionTarget raw_setpoint = policy_.step();
                 local_raw_pub_->publish(raw_setpoint);
+                break;
+            }
+
+            case FSMState::HOME: {
+                double current_alt = current_pose_.pose.position.z;
+                if (current_alt < 0.20) {
+                    RCLCPP_WARN(this->get_logger(), "Ground sink / low altitude detected in HOME (alt: %.2fm < 0.20m). Auto-disarming to OFF.", current_alt);
+                    current_fsm_state_ = FSMState::OFF;
+                    requestForceDisarm();
+                    break;
+                }
+
+                if (current_mavros_state_.mode != "GUIDED" && (current_time - last_request_time_).seconds() > 2.0) {
+                    requestSetMode("GUIDED");
+                    last_request_time_ = current_time;
+                }
+
+                double dx = home_pose_.pose.position.x - current_pose_.pose.position.x;
+                double dy = home_pose_.pose.position.y - current_pose_.pose.position.y;
+                double dz = home_pose_.pose.position.z - current_pose_.pose.position.z;
+                double dist_horiz = std::hypot(dx, dy);
+                double dist_3d = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+                RCLCPP_INFO_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 2000,
+                    "FSM State: HOME. Flying towards Home Waypoint (x: %.2f, y: %.2f, z: %.2f) | Dist: %.2fm (horiz: %.2fm).",
+                    home_pose_.pose.position.x, home_pose_.pose.position.y, home_pose_.pose.position.z,
+                    dist_3d, dist_horiz);
+
+                home_pose_.header.stamp = this->now();
+                home_pose_.header.frame_id = "map";
+                local_pos_pub_->publish(home_pose_);
+                break;
+            }
+
+            case FSMState::FREE: {
+                RCLCPP_INFO_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 5000,
+                    "FSM State: FREE. Full manual / RC control active. Controller passive (no setpoints, no auto-arm/disarm).");
+                // In FREE state: passive, no setpoints published, no auto arm/disarm commands sent
                 break;
             }
 
@@ -565,9 +707,11 @@ private:
     mavros_msgs::msg::State current_mavros_state_;
     geometry_msgs::msg::PoseStamped current_pose_;
     geometry_msgs::msg::PoseStamped hover_pose_;
+    geometry_msgs::msg::PoseStamped home_pose_;
 
     double target_altitude_;
     double altitude_tolerance_;
+    bool has_home_waypoint_{false};
     rclcpp::Time last_request_time_;
     rclcpp::Time last_state_pub_time_;
 
@@ -575,10 +719,13 @@ private:
 
     rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
+    rclcpp::Subscription<mavros_msgs::msg::HomePosition>::SharedPtr home_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr custom_home_sub_;
     
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr local_pos_pub_;
     rclcpp::Publisher<mavros_msgs::msg::PositionTarget>::SharedPtr local_raw_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr current_state_pub_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr target_gate_pub_;
 
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
     rclcpp::Client<mavros_msgs::srv::CommandLong>::SharedPtr command_client_;

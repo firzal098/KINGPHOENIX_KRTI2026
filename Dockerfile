@@ -82,11 +82,13 @@ ENV GSCAM_CONFIG="udpsrc port=5599 caps=\"image/jpeg\" ! jpegdec ! videoconvert"
 COPY ros_entrypoint.sh /ros_entrypoint.sh
 RUN chmod +x /ros_entrypoint.sh
 
-# Install Foxglove Bridge, ROSBridge Suite, vision_msgs, Node.js, and npm
+# Install Foxglove Bridge, ROSBridge Suite, vision_msgs, image transport plugins, Node.js, and npm
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-${ROS_DISTRO}-foxglove-bridge \
     ros-${ROS_DISTRO}-rosbridge-suite \
     ros-${ROS_DISTRO}-vision-msgs \
+    ros-${ROS_DISTRO}-image-transport-plugins \
+    ros-${ROS_DISTRO}-compressed-image-transport \
     nodejs \
     npm \
     && rm -rf /var/lib/apt/lists/*

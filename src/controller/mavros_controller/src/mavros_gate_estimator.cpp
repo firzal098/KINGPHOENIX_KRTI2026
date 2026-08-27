@@ -222,10 +222,18 @@ private:
         const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
         std::shared_ptr<std_srvs::srv::Trigger::Response> response)
     {
+        if (drone_pose_received_) {
+            initial_drone_pos_ = latest_drone_pos_;
+            initial_drone_rot_ = latest_drone_rot_;
+        }
         initialize_gate_priors();
         response->success = true;
-        response->message = "Gate positions and error covariances reset to initial anchored priors.";
-        RCLCPP_INFO(this->get_logger(), "All gate states successfully reset.");
+        response->message = "Gate positions and covariances reset to initial priors anchored at current drone position.";
+        RCLCPP_INFO(
+            this->get_logger(),
+            "All gate states successfully reset and re-anchored to current drone pose: [%.2f, %.2f, %.2f].",
+            initial_drone_pos_.x(), initial_drone_pos_.y(), initial_drone_pos_.z()
+        );
     }
 
     void drone_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {

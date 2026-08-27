@@ -1,7 +1,8 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, TimerAction, RegisterEventHandler
+from launch.event_handlers import OnShutdown
 from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -45,20 +46,27 @@ def generate_launch_description():
         }]
     )
 
-    mavros_launch = IncludeLaunchDescription(
-        AnyLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory('mavros'),
-                'launch',
-                'apm.launch'
-            )
-        ),
-        launch_arguments={
-            'fcu_url':       'tcp://172.24.123.183:5760',
-            'gcs_url':       'udp://@172.24.112.1:14550',
-            'tgt_system':    '1',
-            'tgt_component': '1',
-        }.items()
+    mavros_node = Node(
+        package='mavros',
+        executable='mavros_node',
+        namespace='mavros',
+        output='screen',
+        parameters=[
+            os.path.join(get_package_share_directory('mavros'), 'launch', 'apm_pluginlists.yaml'),
+            os.path.join(get_package_share_directory('mavros'), 'launch', 'apm_config.yaml'),
+            {
+                'fcu_url':       'tcp://172.24.123.183:5760',
+                'gcs_url':       'udp://@172.24.112.1:14550',
+                'tgt_system':    1,
+                'tgt_component': 1,
+                'time.timesync_rate': 0.0,  # Disables timesync spam directly
+            }
+        ],
+        arguments=[
+            '--log-level', 'rcl.logging_rosout:=ERROR',
+            '--log-level', 'mavros.param:=WARN',
+            '--log-level', 'mavros.time:=ERROR',
+        ]
     )
 
     set_message_interval = TimerAction(
@@ -128,7 +136,7 @@ def generate_launch_description():
             'port': 9090,
             'max_message_size': 10000000,
         }],
-        arguments=['--ros-args', '--log-level', 'rosbridge_websocket:=WARN']
+    #    arguments=['--ros-args', '--log-level', 'rosbridge_websocket:=WARN']
     )
 
     # Locate src/gcs directory dynamically
@@ -139,10 +147,28 @@ def generate_launch_description():
     ]
     gcs_dir = next((d for d in gcs_candidates if os.path.exists(os.path.join(d, 'package.json'))), '/ros_ws/src/gcs')
 
-    gcs_frontend_process = ExecuteProcess(
-        cmd=['bash', '-c', 'if [ ! -d node_modules ]; then npm install; fi && npm run dev'],
-        cwd=gcs_dir,
-        output='screen',
+    gcs_frontend_process = TimerAction(
+        period=3.0,
+        actions=[
+            ExecuteProcess(
+                cmd=['npm', 'run', 'dev'],
+                cwd=gcs_dir,
+                output='screen',
+                emulate_tty=True,
+            )
+        ]
+    )
+
+    # Cleanup handler to ensure rosbridge and lingering processes are terminated on launch shutdown
+    shutdown_handler = RegisterEventHandler(
+        OnShutdown(
+            on_shutdown=[
+                ExecuteProcess(
+                    cmd=['bash', '-c', 'pkill -9 -f rosbridge_websocket 2>/dev/null || true; fuser -k 5173/tcp 2>/dev/null || true'],
+                    output='screen',
+                )
+            ]
+        )
     )
 
     return LaunchDescription([
@@ -151,7 +177,7 @@ def generate_launch_description():
         frame_id_arg,
         fov_arg,
         camera_node,
-        mavros_launch,
+        mavros_node,
         set_message_interval,
         set_stream_rate,
         mavros_estimator_node,
@@ -159,4 +185,5 @@ def generate_launch_description():
         controller_node,
         rosbridge_websocket_node,
         gcs_frontend_process,
+        shutdown_handler,
     ])
