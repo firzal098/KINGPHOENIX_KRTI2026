@@ -29,6 +29,7 @@ struct GatePriorRDF {
 struct GateState {
     int id;
     Eigen::Vector3d position_enu;   // 3D position in local ENU frame
+    Eigen::Vector3d prior_pos_enu;  // Initial surveyed prior position in local ENU
     Eigen::Matrix3d covariance;     // 3x3 error covariance matrix
     Eigen::Vector3d normal_enu;     // Gate normal vector in ENU frame
     Eigen::Quaterniond orientation; // Orientation quaternion in ENU
@@ -48,15 +49,21 @@ public:
         this->declare_parameter<double>("pnp_vision_sigma", 4.0);
         this->declare_parameter<double>("association_max_dist", 6.0);
         this->declare_parameter<double>("mahalanobis_thresh_sq", 11.345);
+        this->declare_parameter<double>("max_prior_deviation_m", 1.5);
+        this->declare_parameter<double>("max_refine_tilt_deg", 18.0);
+        this->declare_parameter<double>("max_refine_distance_m", 18.0);
         this->declare_parameter<bool>("publish_initial_pos", true);
 
         // Safe parameter reading (handles int or double from launch files without crashing)
-        prior_sigma_         = get_param_as_double("gate_prior_sigma", 1.5);
-        drone_sigma_         = get_param_as_double("drone_pose_sigma", 2.0);
-        pnp_sigma_           = get_param_as_double("pnp_vision_sigma", 4.0);
-        max_dist_            = get_param_as_double("association_max_dist", 6.0);
-        mahalanobis_max_sq_  = get_param_as_double("mahalanobis_thresh_sq", 11.345);
-        publish_initial_pos_ = this->get_parameter("publish_initial_pos").as_bool();
+        prior_sigma_          = get_param_as_double("gate_prior_sigma", 1.5);
+        drone_sigma_          = get_param_as_double("drone_pose_sigma", 2.0);
+        pnp_sigma_            = get_param_as_double("pnp_vision_sigma", 4.0);
+        max_dist_             = get_param_as_double("association_max_dist", 6.0);
+        mahalanobis_max_sq_   = get_param_as_double("mahalanobis_thresh_sq", 11.345);
+        max_prior_deviation_  = get_param_as_double("max_prior_deviation_m", 1.5);
+        max_tilt_rad_         = get_param_as_double("max_refine_tilt_deg", 18.0) * (M_PI / 180.0);
+        max_refine_dist_      = get_param_as_double("max_refine_distance_m", 18.0);
+        publish_initial_pos_  = this->get_parameter("publish_initial_pos").as_bool();
 
         // Initialize zero offset defaults until first MAVROS pose is received
         initial_drone_pos_ = Eigen::Vector3d::Zero();
@@ -178,9 +185,10 @@ private:
             Eigen::Vector3d rel_pos_enu(p.z_rdf, -p.x_rdf, -p.y_rdf);
             Eigen::Vector3d rel_norm_enu(p.nz_rdf, -p.nx_rdf, -p.ny_rdf);
 
-            state.position_enu = initial_drone_pos_ + (initial_drone_rot_ * rel_pos_enu);
-            state.normal_enu   = (initial_drone_rot_ * rel_norm_enu).normalized();
-            state.covariance   = Eigen::Matrix3d::Identity() * initial_var;
+            state.position_enu  = initial_drone_pos_ + (initial_drone_rot_ * rel_pos_enu);
+            state.prior_pos_enu = state.position_enu;
+            state.normal_enu    = (initial_drone_rot_ * rel_norm_enu).normalized();
+            state.covariance    = Eigen::Matrix3d::Identity() * initial_var;
 
             Eigen::Vector3d default_facing(1.0, 0.0, 0.0);
             state.orientation = Eigen::Quaterniond::FromTwoVectors(default_facing, state.normal_enu);
@@ -293,7 +301,21 @@ private:
             return;
         }
 
-        // 1. Target Gate Isolation: Only the active target gate is refined
+        // 1. Attitude Gating: Skip vision updates when drone is in high pitch/roll maneuvers to prevent projection errors
+        double qw = latest_drone_rot_.w();
+        double qx = latest_drone_rot_.x();
+        double qy = latest_drone_rot_.y();
+        double qz = latest_drone_rot_.z();
+
+        double roll = std::atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy));
+        double sin_pitch = std::clamp(2.0 * (qw * qy - qz * qx), -1.0, 1.0);
+        double pitch = std::asin(sin_pitch);
+
+        if (std::abs(roll) > max_tilt_rad_ || std::abs(pitch) > max_tilt_rad_) {
+            return;
+        }
+
+        // 2. Target Gate Isolation: Only the active target gate is refined
         int target_idx = active_target_gate_idx_;
         if (target_idx < 0 || target_idx >= static_cast<int>(gates_.size())) {
             return;
@@ -314,7 +336,12 @@ private:
             Eigen::Vector3d p_pnp_rdf(pnp_pose.position.x, pnp_pose.position.y, pnp_pose.position.z);
             double dist_to_cam = p_pnp_rdf.norm();
 
-            // 2. Distance-dependent Error Sigma: 8.0m sigma on distance > 20m
+            // 3. Distance Gating: Skip detections beyond max_refine_dist_ (depth noise is too high)
+            if (dist_to_cam > max_refine_dist_) {
+                continue;
+            }
+
+            // Distance-dependent Error Sigma: 8.0m sigma on distance > 20m, down to base sigma at <= 5m
             double eff_pnp_sigma = pnp_sigma_;
             if (dist_to_cam > 20.0) {
                 eff_pnp_sigma = 8.0;
@@ -361,6 +388,18 @@ private:
 
         gate.position_enu += K * y;
         gate.covariance = (Eigen::Matrix3d::Identity() - K) * gate.covariance;
+
+        // Anti-Drift Prior Anchor Clamping: Prevent the gate from wandering more than max_prior_deviation_ from surveyed prior
+        Eigen::Vector3d dev = gate.position_enu - gate.prior_pos_enu;
+        double horiz_dev = std::hypot(dev.x(), dev.y());
+        if (horiz_dev > max_prior_deviation_) {
+            double scale = max_prior_deviation_ / horiz_dev;
+            gate.position_enu.x() = gate.prior_pos_enu.x() + dev.x() * scale;
+            gate.position_enu.y() = gate.prior_pos_enu.y() + dev.y() * scale;
+        }
+
+        // Tightly clamp vertical Z (gate center nominal height is fixed)
+        gate.position_enu.z() = std::clamp(gate.position_enu.z(), gate.prior_pos_enu.z() - 0.35, gate.prior_pos_enu.z() + 0.35);
     }
 
     void publish_refined_poses(const std_msgs::msg::Header &header) {
@@ -454,6 +493,9 @@ private:
     double pnp_sigma_;
     double max_dist_;
     double mahalanobis_max_sq_;
+    double max_prior_deviation_;
+    double max_tilt_rad_;
+    double max_refine_dist_;
     bool publish_initial_pos_;
 
     // Data structures & matrices
