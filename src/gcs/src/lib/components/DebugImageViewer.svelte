@@ -203,7 +203,7 @@
         {/if}
       {:else}
         <!-- 3D Tab Active Pill -->
-        <span class="info-pill font-mono 3d-live">
+        <span class="info-pill font-mono live-3d">
           THREE.JS &bull; 60 FPS
         </span>
       {/if}
@@ -635,7 +635,7 @@
     position: relative;
   }
 
-  .info-pill.3d-live {
+  .info-pill.live-3d {
     background: rgba(16, 185, 129, 0.15);
     color: #34d399;
     border: 1px solid rgba(16, 185, 129, 0.3);

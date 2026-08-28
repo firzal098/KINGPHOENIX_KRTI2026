@@ -55,10 +55,11 @@ def generate_launch_description():
             os.path.join(get_package_share_directory('mavros'), 'launch', 'apm_pluginlists.yaml'),
             os.path.join(get_package_share_directory('mavros'), 'launch', 'apm_config.yaml'),
             {
-                'fcu_url':       'tcp://172.24.123.183:5760',
-                'gcs_url':       'udp://@172.24.112.1:14550',
-                'tgt_system':    1,
-                'tgt_component': 1,
+                'use_sim_time':       True,
+                'fcu_url':            'tcp://172.24.123.183:5760',
+                'gcs_url':            'udp://@172.24.112.1:14550',
+                'tgt_system':         1,
+                'tgt_component':      1,
                 'time.timesync_rate': 0.0,  # Disables timesync spam directly
             }
         ],

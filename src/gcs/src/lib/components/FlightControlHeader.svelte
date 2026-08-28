@@ -129,8 +129,8 @@
     <!-- Quick Altitude & Speed -->
     <div class="quick-stats">
       <div class="stat-box">
-        <span class="stat-lbl">ALT (Z)</span>
-        <span class="stat-val font-mono">{$dronePose.z.toFixed(2)} <small>m</small></span>
+        <span class="stat-lbl">ALT (AGL)</span>
+        <span class="stat-val font-mono">{($dronePose.rel_alt !== undefined ? $dronePose.rel_alt : $dronePose.z).toFixed(2)} <small>m</small></span>
       </div>
       <div class="stat-box">
         <span class="stat-lbl">SPEED</span>

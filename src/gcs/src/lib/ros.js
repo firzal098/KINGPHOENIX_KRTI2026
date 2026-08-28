@@ -167,6 +167,12 @@ export const structuredAction = derived(rawAction, ($act) => {
   };
 });
 
+// Reset Action and Observation space telemetry to zero
+export function resetPolicyTelemetry() {
+  rawObservation.set(new Array(40).fill(0.0));
+  rawAction.set([0.0, 0.0, 0.0, 0.0]);
+}
+
 export const serviceResponseLog = writable([]);
 
 // ROS instance and topics
@@ -247,11 +253,30 @@ function subscribeTopics() {
   });
   fsmSub.subscribe((msg) => {
     if (msg?.data) {
-      controllerFsmState.set(msg.data.toUpperCase());
+      const stateUpper = msg.data.toUpperCase();
+      controllerFsmState.set(stateUpper);
+      if (stateUpper === 'HOVER' || stateUpper === 'OFF' || stateUpper === 'LANDING' || stateUpper === 'FREE') {
+        resetPolicyTelemetry();
+      }
     }
   });
 
-  // 1b. Active Target Gate Index (/controller/target_gate_index)
+  // 1b. Active Target Gate Index (/controller/target_gate_index or /policy/target_gate)
+  let prevTargetGate = null;
+
+  function handleGateAdvance(newIndex) {
+    if (prevTargetGate !== null && newIndex > prevTargetGate) {
+      const passedGateNum = prevTargetGate + 1;
+      if (newIndex >= 5) {
+        addToast(`🏁 ALL GATES CLEARED! Course Completed (Gate #${passedGateNum}/5 Passed)!`, 'success', 5000);
+      } else {
+        addToast(`🎯 GATE #${passedGateNum} PASSED SUCCESSFULLY! Next Target: GATE #${newIndex + 1}`, 'success', 3500);
+      }
+    }
+    prevTargetGate = newIndex;
+    targetGateIndex.set(newIndex);
+  }
+
   const targetGateSub = new ROSLIB.Topic({
     ros,
     name: '/controller/target_gate_index',
@@ -259,7 +284,18 @@ function subscribeTopics() {
   });
   targetGateSub.subscribe((msg) => {
     if (msg && typeof msg.data === 'number') {
-      targetGateIndex.set(msg.data);
+      handleGateAdvance(msg.data);
+    }
+  });
+
+  const policyTargetGateSub = new ROSLIB.Topic({
+    ros,
+    name: '/policy/target_gate',
+    messageType: 'std_msgs/msg/Int32',
+  });
+  policyTargetGateSub.subscribe((msg) => {
+    if (msg && typeof msg.data === 'number') {
+      handleGateAdvance(msg.data);
     }
   });
 
@@ -278,7 +314,20 @@ function subscribeTopics() {
     });
   });
 
-  // 3. Drone Pose
+  // 3. Relative Altitude Above Home (Matches Mission Planner)
+  let mavrosRelAlt = null;
+  let groundZOrigin = null;
+
+  const relAltSub = new ROSLIB.Topic({
+    ros,
+    name: '/mavros/global_position/rel_alt',
+    messageType: 'std_msgs/msg/Float64',
+  });
+  relAltSub.subscribe((msg) => {
+    mavrosRelAlt = msg.data;
+  });
+
+  // 4. Drone Pose
   const poseSub = new ROSLIB.Topic({
     ros,
     name: '/mavros/local_position/pose',
@@ -288,10 +337,23 @@ function subscribeTopics() {
     const { x, y, z } = msg.pose.position;
     const { x: qx, y: qy, z: qz, w: qw } = msg.pose.orientation;
     const { roll, pitch, yaw } = quaternionToEuler(qx, qy, qz, qw);
+
+    // Track ground altitude when disarmed
+    let stateVal;
+    fcuState.subscribe((s) => (stateVal = s))();
+    if (!stateVal?.armed || groundZOrigin === null) {
+      groundZOrigin = z;
+    }
+
+    const relAlt = (mavrosRelAlt !== null && !isNaN(mavrosRelAlt))
+      ? mavrosRelAlt
+      : (z - (groundZOrigin !== null ? groundZOrigin : 0));
+
     dronePose.set({
       x,
       y,
       z,
+      rel_alt: relAlt,
       qx,
       qy,
       qz,
@@ -437,6 +499,10 @@ export function togglePerceptionStream() {
 
 // Call change_state service with interactive notifications
 export function callChangeState(stateName) {
+  if (stateName === 'HOVER' || stateName === 'OFF' || stateName === 'HOME' || stateName === 'FREE') {
+    resetPolicyTelemetry();
+  }
+
   if (!ros) {
     addToast('Cannot send command: ROS is not connected!', 'error', 4000);
     return;
@@ -507,6 +573,8 @@ export function callResetGates() {
     request,
     (result) => {
       if (result.success) {
+        prevTargetGate = null;
+        targetGateIndex.set(0);
         addToast(`✅ Gates Reset: ${result.message}`, 'success', 4000);
       } else {
         addToast(`⚠️ Gate Reset: ${result.message}`, 'warning', 4000);
@@ -533,4 +601,21 @@ export function callResetGates() {
       ]);
     }
   );
+}
+
+// Manually change active target gate (0 = Gate #1, 1 = Gate #2, etc.)
+export function setTargetGate(index) {
+  if (!ros) {
+    addToast('Cannot switch gate: ROS is not connected!', 'error', 3000);
+    return;
+  }
+  const targetIndex = Math.max(0, Math.min(4, Math.floor(index)));
+  const topic = new ROSLIB.Topic({
+    ros,
+    name: '/controller/set_target_gate',
+    messageType: 'std_msgs/msg/Int32',
+  });
+  topic.publish(new ROSLIB.Message({ data: targetIndex }));
+  targetGateIndex.set(targetIndex);
+  addToast(`🎯 Active Target switched to: GATE #${targetIndex + 1}`, 'info', 2000);
 }

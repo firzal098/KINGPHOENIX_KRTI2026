@@ -1,5 +1,11 @@
 <script>
-  import { structuredObservation, rawObservation, targetGateLabel, targetGateIndex } from '../ros.js';
+  import {
+    structuredObservation,
+    rawObservation,
+    targetGateLabel,
+    targetGateIndex,
+    setTargetGate
+  } from '../ros.js';
 
   let showRaw = false;
 
@@ -113,9 +119,22 @@
         <div class="sub-header font-hud">
           <div class="gate-header-left">
             <span class="sub-dot green"></span>
-            <span>3. ACTIVE TARGET: {$targetGateLabel}</span>
+            <span>3. ACTIVE: {$targetGateLabel}</span>
             <span class="dim-tag font-mono">15D [6:21]</span>
           </div>
+
+          <div class="gate-quick-switcher font-hud">
+            {#each [0, 1, 2, 3, 4] as gIdx}
+              <button
+                class="gate-btn { $targetGateIndex === gIdx ? 'active' : '' }"
+                on:click={() => setTargetGate(gIdx)}
+                title="Target Gate #{gIdx + 1}"
+              >
+                G{gIdx + 1}
+              </button>
+            {/each}
+          </div>
+
           <span class="dist-badge font-mono">
             Dist: {$structuredObservation.active_gate.dist.toFixed(2)}m
           </span>
@@ -387,6 +406,41 @@
     border-radius: 4px;
     border: 1px solid rgba(16, 185, 129, 0.3);
     font-weight: 700;
+  }
+
+  .gate-quick-switcher {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: rgba(0, 0, 0, 0.4);
+    padding: 2px 4px;
+    border-radius: 5px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .gate-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: #94a3b8;
+    font-size: 0.62rem;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .gate-btn:hover {
+    color: #34d399;
+    background: rgba(16, 185, 129, 0.15);
+  }
+
+  .gate-btn.active {
+    background: #10b981;
+    color: #070b12;
+    font-weight: 800;
+    border-color: #34d399;
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
   }
 
   .coords-row {

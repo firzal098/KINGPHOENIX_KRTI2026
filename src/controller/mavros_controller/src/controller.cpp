@@ -83,6 +83,17 @@ public:
         target_gate_pub_ = this->create_publisher<std_msgs::msg::Int32>(
             "/controller/target_gate_index", 10);
 
+        // Subscriber to manually set Active Target Gate Index from GCS
+        set_target_gate_sub_ = this->create_subscription<std_msgs::msg::Int32>(
+            "/controller/set_target_gate", qos_reliable,
+            [this](const std_msgs::msg::Int32::SharedPtr msg) {
+                if (msg && msg->data >= 0 && msg->data < 5) {
+                    policy_.setTargetGateIndex(static_cast<size_t>(msg->data));
+                    RCLCPP_INFO(this->get_logger(), "Active Target Gate switched manually to: Gate #%d", msg->data + 1);
+                    publishCurrentState();
+                }
+            });
+
         // Service Clients
         arming_client_ = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
         command_client_ = this->create_client<mavros_msgs::srv::CommandLong>("/mavros/cmd/command");
@@ -108,6 +119,10 @@ public:
         this->declare_parameter<std::string>("model_path", default_model_path);
         std::string model_path = this->get_parameter("model_path").as_string();
         policy_.init(this, model_path);
+
+        this->declare_parameter<double>("target_altitude", 1.0);
+        target_altitude_ = this->get_parameter("target_altitude").as_double();
+
         // 50 Hz timer loop (20 ms period)
         timer_ = this->create_wall_timer(
             20ms, std::bind(&ControllerNode::fsmLoop, this));
@@ -203,6 +218,8 @@ public:
                 if (current_mavros_state_.mode != "GUIDED") {
                     requestSetMode("GUIDED");
                 }
+                policy_.reset();
+                run_start_time_ = this->now();
                 current_fsm_state_ = FSMState::RUN;
                 publishCurrentState();
                 return true;
@@ -211,6 +228,8 @@ public:
                 return false;
             } else {
                 RCLCPP_INFO(this->get_logger(), "Already in or transitioning to RUN mode.");
+                policy_.reset();
+                run_start_time_ = this->now();
                 current_fsm_state_ = FSMState::RUN;
                 publishCurrentState();
                 return true;
@@ -318,6 +337,17 @@ private:
             last_state_pub_time_ = current_time;
         }
 
+        // Calculate Ground-Relative Altitude (AGL)
+        // If on the ground and disarmed in OFF/ARMING, continuously track ground level
+        if (!current_mavros_state_.armed && current_fsm_state_ <= FSMState::ARMING) {
+            ground_altitude_ = current_pose_.pose.position.z;
+            has_ground_altitude_ = true;
+        }
+
+        double ground_z = has_ground_altitude_ ? ground_altitude_ : 0.0;
+        double current_alt_agl = current_pose_.pose.position.z - ground_z;
+        double target_local_z = ground_z + target_altitude_;
+
         switch (current_fsm_state_) {
             case FSMState::OFF: {
                 RCLCPP_INFO_THROTTLE(
@@ -333,10 +363,13 @@ private:
 
             case FSMState::WAIT_FOR_FCU_CONNECT: {
                 if (current_mavros_state_.connected) {
-                    RCLCPP_INFO(this->get_logger(), "FCU connected. Switching to SET_MODE_GUIDED.");
+                    RCLCPP_INFO(this->get_logger(), "FCU Link OK. Transitioning to SET_MODE_GUIDED.");
                     current_fsm_state_ = FSMState::SET_MODE_GUIDED;
+                    last_request_time_ = current_time;
                 } else {
-                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Waiting for FCU connection...");
+                    RCLCPP_INFO_THROTTLE(
+                        this->get_logger(), *this->get_clock(), 2000,
+                        "Waiting for FCU connection...");
                 }
                 break;
             }
@@ -354,7 +387,7 @@ private:
 
             case FSMState::ARMING: {
                 if (current_mavros_state_.armed) {
-                    RCLCPP_INFO(this->get_logger(), "Drone armed successfully. Switching to TAKEOFF state.");
+                    RCLCPP_INFO(this->get_logger(), "Drone armed successfully. Latching ground altitude at %.2fm. Switching to TAKEOFF.", ground_altitude_);
                     current_fsm_state_ = FSMState::TAKEOFF;
                 } else if ((current_time - last_request_time_).seconds() > 2.0) {
                     requestArming(true);
@@ -365,8 +398,10 @@ private:
 
             case FSMState::TAKEOFF: {
                 if ((current_time - last_request_time_).seconds() > 2.0) {
+                    hover_pose_ = current_pose_;
+                    hover_pose_.pose.position.z = target_local_z;
                     requestTakeoff(static_cast<float>(target_altitude_));
-                    RCLCPP_INFO(this->get_logger(), "Takeoff command sent to height %.2fm. Transitioning to CLIMBING.", target_altitude_);
+                    RCLCPP_INFO(this->get_logger(), "Takeoff command sent to height %.2fm AGL (local z: %.2fm). Transitioning to CLIMBING.", target_altitude_, target_local_z);
                     current_fsm_state_ = FSMState::CLIMBING;
                     last_request_time_ = current_time;
                 }
@@ -374,14 +409,13 @@ private:
             }
 
             case FSMState::CLIMBING: {
-                double current_alt = current_pose_.pose.position.z;
-
                 RCLCPP_INFO_THROTTLE(
                     this->get_logger(), *this->get_clock(), 500,
-                    "Climbing... Target: %.2fm, Current: %.2fm", target_altitude_, current_alt);
+                    "Climbing... Target: %.2fm AGL (local: %.2fm), Current: %.2fm AGL (local: %.2fm)", 
+                    target_altitude_, target_local_z, current_alt_agl, current_pose_.pose.position.z);
 
-                // If drone hasn't lifted off (< 0.15m) after 2.5s, re-trigger arming & takeoff
-                if (current_alt < 0.15 && (current_time - last_request_time_).seconds() > 2.5) {
+                // If drone hasn't lifted off (< 0.15m AGL) after 2.5s, re-trigger arming & takeoff
+                if (current_alt_agl < 0.15 && (current_time - last_request_time_).seconds() > 2.5) {
                     if (!current_mavros_state_.armed) {
                         RCLCPP_WARN(this->get_logger(), "Drone not armed in CLIMBING. Sending force arm.");
                         requestForceArm();
@@ -392,12 +426,18 @@ private:
                     RCLCPP_INFO(this->get_logger(), "Re-sending takeoff command...");
                     requestTakeoff(static_cast<float>(target_altitude_));
                     last_request_time_ = current_time;
+                } else if (current_alt_agl >= 0.20) {
+                    // Actively stream target altitude setpoint to guide ArduPilot past initial takeoff threshold
+                    hover_pose_.header.stamp = this->now();
+                    hover_pose_.header.frame_id = "map";
+                    hover_pose_.pose.position.z = target_local_z;
+                    local_pos_pub_->publish(hover_pose_);
                 }
 
-                if (current_alt >= (target_altitude_ - altitude_tolerance_)) {
-                    RCLCPP_INFO(this->get_logger(), "Target altitude reached (%.2fm). Transitioning to HOVER.", current_alt);
+                if (current_alt_agl >= (target_altitude_ - altitude_tolerance_)) {
+                    RCLCPP_INFO(this->get_logger(), "Target altitude reached (%.2fm AGL). Transitioning to HOVER.", current_alt_agl);
                     hover_pose_ = current_pose_;
-                    hover_pose_.pose.position.z = target_altitude_;
+                    hover_pose_.pose.position.z = target_local_z;
                     current_fsm_state_ = FSMState::HOVER;
                     publishCurrentState();
                 }
@@ -405,9 +445,8 @@ private:
             }
 
             case FSMState::HOVER: {
-                double current_alt = current_pose_.pose.position.z;
-                if (current_alt < 0.20) {
-                    RCLCPP_WARN(this->get_logger(), "Ground sink / low altitude detected in HOVER (alt: %.2fm < 0.20m). Auto-disarming to OFF.", current_alt);
+                if (current_alt_agl < 0.20) {
+                    RCLCPP_WARN(this->get_logger(), "Ground sink detected in HOVER (alt: %.2fm AGL < 0.20m). Auto-disarming to OFF.", current_alt_agl);
                     current_fsm_state_ = FSMState::OFF;
                     requestForceDisarm();
                     break;
@@ -415,18 +454,18 @@ private:
 
                 RCLCPP_INFO_THROTTLE(
                     this->get_logger(), *this->get_clock(), 5000,
-                    "FSM State: HOVER. Maintaining altitude at %.2fm.", hover_pose_.pose.position.z);
+                    "FSM State: HOVER. Maintaining altitude at %.2fm AGL (local: %.2fm).", target_altitude_, hover_pose_.pose.position.z);
 
                 hover_pose_.header.stamp = this->now();
                 hover_pose_.header.frame_id = "map";
+                hover_pose_.pose.position.z = target_local_z;
                 local_pos_pub_->publish(hover_pose_);
                 break;
             }
 
             case FSMState::RUN: {
-                double current_alt = current_pose_.pose.position.z;
-                if (current_alt < 0.20) {
-                    RCLCPP_WARN(this->get_logger(), "Ground sink / low altitude detected in RUN (alt: %.2fm < 0.20m). Auto-disarming to OFF.", current_alt);
+                if (current_alt_agl < 0.20 && (current_time - run_start_time_).seconds() > 2.0) {
+                    RCLCPP_WARN(this->get_logger(), "Ground sink detected in RUN (alt: %.2fm AGL < 0.20m). Auto-disarming to OFF.", current_alt_agl);
                     current_fsm_state_ = FSMState::OFF;
                     requestForceDisarm();
                     break;
@@ -444,9 +483,8 @@ private:
             }
 
             case FSMState::HOME: {
-                double current_alt = current_pose_.pose.position.z;
-                if (current_alt < 0.20) {
-                    RCLCPP_WARN(this->get_logger(), "Ground sink / low altitude detected in HOME (alt: %.2fm < 0.20m). Auto-disarming to OFF.", current_alt);
+                if (current_alt_agl < 0.20) {
+                    RCLCPP_WARN(this->get_logger(), "Ground sink detected in HOME (alt: %.2fm AGL < 0.20m). Auto-disarming to OFF.", current_alt_agl);
                     current_fsm_state_ = FSMState::OFF;
                     requestForceDisarm();
                     break;
@@ -711,9 +749,12 @@ private:
 
     double target_altitude_;
     double altitude_tolerance_;
+    double ground_altitude_{0.0};
+    bool has_ground_altitude_{false};
     bool has_home_waypoint_{false};
     rclcpp::Time last_request_time_;
     rclcpp::Time last_state_pub_time_;
+    rclcpp::Time run_start_time_;
 
     Policy policy_;
 
@@ -721,6 +762,7 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
     rclcpp::Subscription<mavros_msgs::msg::HomePosition>::SharedPtr home_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr custom_home_sub_;
+    rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr set_target_gate_sub_;
     
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr local_pos_pub_;
     rclcpp::Publisher<mavros_msgs::msg::PositionTarget>::SharedPtr local_raw_pub_;

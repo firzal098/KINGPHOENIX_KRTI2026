@@ -500,10 +500,10 @@ public:
         // Earth frame velocity setpoint (MAV_FRAME_LOCAL_NED)
         setpoint.coordinate_frame = mavros_msgs::msg::PositionTarget::FRAME_LOCAL_NED;
 
-        // Type Mask: Ignore Position, Acceleration, and Yaw Angle. Stream Velocity + Yaw Rate.
+        // Type Mask: Ignore horizontal Position (X, Y), all Acceleration, and Yaw Angle.
+        // Enforce closed-loop Altitude Hold at Position Z (target_z = 1.05m / gate center height).
         setpoint.type_mask = mavros_msgs::msg::PositionTarget::IGNORE_PX |
                              mavros_msgs::msg::PositionTarget::IGNORE_PY |
-                             mavros_msgs::msg::PositionTarget::IGNORE_PZ |
                              mavros_msgs::msg::PositionTarget::IGNORE_AFX |
                              mavros_msgs::msg::PositionTarget::IGNORE_AFY |
                              mavros_msgs::msg::PositionTarget::IGNORE_AFZ |
@@ -528,11 +528,47 @@ public:
         // Rotate horizontal action [v_fwd, v_left] into World ENU frame (1:1 match with training step in crazyflow_gate_env.py)
         double vx_world = cos_y * action[0] - sin_y * action[1];
         double vy_world = sin_y * action[0] + cos_y * action[1];
-        double vz_world = action[2]; // Earth vertical velocity (Up)
 
-        setpoint.velocity.x = vx_world;
-        setpoint.velocity.y = vy_world;
-        setpoint.velocity.z = vz_world;
+        // Target nominal gate center (z = 1.0m)
+        double target_z = 1.0;
+        if (!current_gate_poses_.poses.empty() && current_gate_target_index_ < current_gate_poses_.poses.size()) {
+            double gz = current_gate_poses_.poses[current_gate_target_index_].position.z;
+            if (gz >= 0.5 && gz <= 2.5) {
+                target_z = gz;
+            }
+        }
+
+        // Initialize filter state from current velocity if not yet set
+        if (!has_filtered_vel_) {
+            filtered_vx_ = current_local_vel_.twist.linear.x;
+            filtered_vy_ = current_local_vel_.twist.linear.y;
+            filtered_vz_ = current_local_vel_.twist.linear.z;
+            has_filtered_vel_ = true;
+        }
+
+        // 7. Acceleration Slew-Rate Limiter (a_max = 5.6638 m/s^2 from crazyflow_gate_env.py)
+        // Prevents excessive pitch tilt that causes vertical lift loss
+        const double dt = 0.02; // 50 Hz control period
+        const double a_max = 5.6638; // Maximum acceleration [m/s^2]
+        const double max_dv = a_max * dt; // 0.1133 m/s max velocity change per step
+
+        double dvx = vx_world - filtered_vx_;
+        double dvy = vy_world - filtered_vy_;
+        double dv_norm = std::hypot(dvx, dvy);
+        if (dv_norm > max_dv) {
+            filtered_vx_ += (dvx / dv_norm) * max_dv;
+            filtered_vy_ += (dvy / dv_norm) * max_dv;
+        } else {
+            filtered_vx_ = vx_world;
+            filtered_vy_ = vy_world;
+        }
+
+        // Commanded targets streamed to MAVROS
+        // setpoint.position.z = target_z;just disabling this temporarily
+        setpoint.velocity.x = filtered_vx_;
+        setpoint.velocity.y = filtered_vy_;
+        // setpoint.velocity.z = action[2]; just disabling this temporarily
+        setpoint.velocity.z = 0;
 
         // Yaw rate (CCW positive in FLU/ENU)
         setpoint.yaw_rate = action[3];
@@ -540,9 +576,26 @@ public:
         return setpoint;
     }
 
+    /**
+     * @brief Resets policy internal state, actuator filters, and gate trackers.
+     */
+    void reset()
+    {
+        has_filtered_vel_ = false;
+        filtered_vx_ = 0.0;
+        filtered_vy_ = 0.0;
+        filtered_vz_ = 0.0;
+        prev_action_ = {0.0, 0.0, 0.0, 0.0};
+        has_prev_dot_ = false;
+    }
+
     // Getters and Setters
     size_t getTargetGateIndex() const { return current_gate_target_index_; }
-    void setTargetGateIndex(size_t index) { current_gate_target_index_ = index; }
+    void setTargetGateIndex(size_t index) {
+        current_gate_target_index_ = index;
+        has_prev_dot_ = false;
+        prev_dot_product_ = 1.0;
+    }
     const std::array<double, 40>& getObservationVector() const { return observation_vector_; }
 
 private:
@@ -565,6 +618,11 @@ private:
     size_t current_gate_target_index_{0};
     double prev_dot_product_{1.0};
     bool has_prev_dot_{false};
+
+    double filtered_vx_{0.0};
+    double filtered_vy_{0.0};
+    double filtered_vz_{0.0};
+    bool has_filtered_vel_{false};
 
     geometry_msgs::msg::PoseArray current_gate_poses_;
     geometry_msgs::msg::PoseStamped current_local_pose_;
