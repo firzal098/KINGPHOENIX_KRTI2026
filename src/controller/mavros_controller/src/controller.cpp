@@ -348,6 +348,11 @@ private:
         double current_alt_agl = current_pose_.pose.position.z - ground_z;
         double target_local_z = ground_z + target_altitude_;
 
+        // Continuously update and stream Observation Space (42D) telemetry in all states
+        if (current_fsm_state_ != FSMState::RUN) {
+            policy_.publishObservation();
+        }
+
         switch (current_fsm_state_) {
             case FSMState::OFF: {
                 RCLCPP_INFO_THROTTLE(

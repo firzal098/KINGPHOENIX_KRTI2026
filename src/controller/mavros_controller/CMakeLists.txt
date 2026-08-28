@@ -10,6 +10,7 @@ find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
@@ -54,6 +55,7 @@ target_include_directories(mavros_gate_estimator PUBLIC
 
 ament_target_dependencies(mavros_gate_estimator
   rclcpp
+  std_msgs
   geometry_msgs
   sensor_msgs
   std_srvs

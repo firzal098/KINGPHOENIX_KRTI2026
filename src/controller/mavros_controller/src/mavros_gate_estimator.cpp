@@ -8,6 +8,7 @@
 #include <Eigen/Geometry>
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/int32.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose.hpp>
@@ -38,7 +39,8 @@ public:
     MavrosGateEstimator() 
     : Node("mavros_gate_estimator"), 
       drone_pose_received_(false), 
-      initial_pose_captured_(false) 
+      initial_pose_captured_(false),
+      active_target_gate_idx_(0)
     {
         // Declare parameters with default double values
         this->declare_parameter<double>("gate_prior_sigma", 1.5);
@@ -79,6 +81,16 @@ public:
         sub_pnp_poses_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
             "/perception/gate_poses_3d", sensor_qos,
             std::bind(&MavrosGateEstimator::pnp_poses_callback, this, std::placeholders::_1)
+        );
+
+        // Subscribe to active target gate index from controller (ensures only active gate is refined)
+        sub_target_gate_ = this->create_subscription<std_msgs::msg::Int32>(
+            "/controller/target_gate_index", 10,
+            [this](const std_msgs::msg::Int32::SharedPtr msg) {
+                if (msg && msg->data >= 0) {
+                    active_target_gate_idx_ = msg->data;
+                }
+            }
         );
 
         // Publishers for Refined Estimates
@@ -192,7 +204,7 @@ private:
             init_box.action = visualization_msgs::msg::Marker::ADD;
             init_box.pose = initial_pose;
             init_box.scale.x = 0.08;
-            init_box.scale.y = 2.0;
+            init_box.scale.y = 1.9;
             init_box.scale.z = 2.0;
             init_box.color.r = 1.0f;
             init_box.color.g = 0.5f;
@@ -226,6 +238,7 @@ private:
             initial_drone_pos_ = latest_drone_pos_;
             initial_drone_rot_ = latest_drone_rot_;
         }
+        active_target_gate_idx_ = 0;
         initialize_gate_priors();
         response->success = true;
         response->message = "Gate positions and covariances reset to initial priors anchored at current drone position.";
@@ -276,43 +289,68 @@ private:
             return;
         }
 
+        if (msg->poses.empty()) {
+            return;
+        }
+
+        // 1. Target Gate Isolation: Only the active target gate is refined
+        int target_idx = active_target_gate_idx_;
+        if (target_idx < 0 || target_idx >= static_cast<int>(gates_.size())) {
+            return;
+        }
+
         const Eigen::Matrix3d R_drone = latest_drone_rot_.toRotationMatrix();
         const Eigen::Matrix3d R_total = R_drone * R_cam_to_body_;
-
-        const Eigen::Matrix3d R_pnp_cam = Eigen::Matrix3d::Identity() * (pnp_sigma_ * pnp_sigma_);
-        const Eigen::Matrix3d R_pnp_world = R_total * R_pnp_cam * R_total.transpose();
         const Eigen::Matrix3d R_drone_pos = Eigen::Matrix3d::Identity() * (drone_sigma_ * drone_sigma_);
 
-        const Eigen::Matrix3d R_meas = R_pnp_world + R_drone_pos;
+        // Find the best matching PnP measurement for ONLY the active target gate
+        int best_pnp_idx = -1;
+        double min_mahalanobis_sq = std::numeric_limits<double>::max();
+        Eigen::Vector3d best_z_meas = Eigen::Vector3d::Zero();
+        Eigen::Matrix3d best_R_meas = Eigen::Matrix3d::Identity();
 
-        for (const auto &pnp_pose : msg->poses) {
+        for (size_t i = 0; i < msg->poses.size(); ++i) {
+            const auto &pnp_pose = msg->poses[i];
             Eigen::Vector3d p_pnp_rdf(pnp_pose.position.x, pnp_pose.position.y, pnp_pose.position.z);
+            double dist_to_cam = p_pnp_rdf.norm();
 
-            // Compute global gate position measurement z in ENU frame
+            // 2. Distance-dependent Error Sigma: 8.0m sigma on distance > 20m
+            double eff_pnp_sigma = pnp_sigma_;
+            if (dist_to_cam > 20.0) {
+                eff_pnp_sigma = 8.0;
+            } else if (dist_to_cam > 5.0) {
+                double ratio = (dist_to_cam - 5.0) / (20.0 - 5.0);
+                eff_pnp_sigma = pnp_sigma_ + ratio * (8.0 - pnp_sigma_);
+            } else {
+                eff_pnp_sigma = pnp_sigma_;
+            }
+
+            const Eigen::Matrix3d R_pnp_cam = Eigen::Matrix3d::Identity() * (eff_pnp_sigma * eff_pnp_sigma);
+            const Eigen::Matrix3d R_pnp_world = R_total * R_pnp_cam * R_total.transpose();
+            const Eigen::Matrix3d R_meas = R_pnp_world + R_drone_pos;
+
+            // Global measured gate position in ENU frame
             Eigen::Vector3d z_meas = latest_drone_pos_ + (R_total * p_pnp_rdf);
 
-            // Data Association using Mahalanobis Distance
-            int best_idx = -1;
-            double min_mahalanobis_sq = std::numeric_limits<double>::max();
-            [[maybe_unused]] double corresponding_euc_dist = 0.0;
+            // Associate strictly against active target gate
+            Eigen::Vector3d y = z_meas - gates_[target_idx].position_enu;
+            Eigen::Matrix3d S = gates_[target_idx].covariance + R_meas;
 
-            for (size_t i = 0; i < gates_.size(); ++i) {
-                Eigen::Vector3d y = z_meas - gates_[i].position_enu;
-                Eigen::Matrix3d S = gates_[i].covariance + R_meas;
-                
-                double m_dist_sq = y.transpose() * S.inverse() * y;
-                double euc_dist  = y.norm();
+            double m_dist_sq = y.transpose() * S.inverse() * y;
+            double euc_dist = y.norm();
+            double dynamic_max_dist = std::max(max_dist_, 2.5 * eff_pnp_sigma);
 
-                if (m_dist_sq < min_mahalanobis_sq && euc_dist <= max_dist_) {
-                    min_mahalanobis_sq = m_dist_sq;
-                    corresponding_euc_dist = euc_dist;
-                    best_idx = static_cast<int>(i);
-                }
+            if (m_dist_sq < min_mahalanobis_sq && euc_dist <= dynamic_max_dist && m_dist_sq <= mahalanobis_max_sq_) {
+                min_mahalanobis_sq = m_dist_sq;
+                best_pnp_idx = static_cast<int>(i);
+                best_z_meas = z_meas;
+                best_R_meas = R_meas;
             }
+        }
 
-            if (best_idx != -1 && min_mahalanobis_sq <= mahalanobis_max_sq_) {
-                update_gate_kalman(gates_[best_idx], z_meas, R_meas, min_mahalanobis_sq);
-            }
+        // Apply EKF update exclusively to the active target gate
+        if (best_pnp_idx != -1) {
+            update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
         }
     }
 
@@ -380,7 +418,7 @@ private:
             box.pose.orientation.z = gate.orientation.z();
             box.pose.orientation.w = gate.orientation.w();
             box.scale.x = 0.1;
-            box.scale.y = 2.0;
+            box.scale.y = 1.9;
             box.scale.z = 2.0;
             box.color.r = 0.0f;
             box.color.g = 0.8f;
@@ -435,12 +473,15 @@ private:
     // ROS 2 Comms
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_drone_pose_;
     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr sub_pnp_poses_;
+    rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr sub_target_gate_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_refined_poses_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_markers_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_initial_poses_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_initial_markers_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_gates_;
     rclcpp::TimerBase::SharedPtr pub_timer_;
+
+    int active_target_gate_idx_{0};
 };
 
 int main(int argc, char **argv) {

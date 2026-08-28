@@ -90,12 +90,12 @@ export function removeToast(id) {
   toasts.update((items) => items.filter((t) => t.id !== id));
 }
 
-// Raw 40D Observation Array
-export const rawObservation = writable(new Array(40).fill(0.0));
+// Raw 42D Observation Array
+export const rawObservation = writable(new Array(42).fill(0.0));
 
 // Structured Observation Derived Store
 export const structuredObservation = derived(rawObservation, ($obs) => {
-  if (!$obs || $obs.length < 40) {
+  if (!$obs || $obs.length < 42) {
     return null;
   }
 
@@ -114,63 +114,70 @@ export const structuredObservation = derived(rawObservation, ($obs) => {
     gz: $obs[5] || 0.0,
   };
 
-  // 3. Active Gate 15D [6:21]
-  const active_gate = {
-    tl: [$obs[6] || 0.0, $obs[7] || 0.0, $obs[8] || 0.0],
-    tr: [$obs[9] || 0.0, $obs[10] || 0.0, $obs[11] || 0.0],
-    bl: [$obs[12] || 0.0, $obs[13] || 0.0, $obs[14] || 0.0],
-    br: [$obs[15] || 0.0, $obs[16] || 0.0, $obs[17] || 0.0],
-    center: [$obs[18] || 0.0, $obs[19] || 0.0, $obs[20] || 0.0],
-    dist: Math.hypot($obs[18] || 0, $obs[19] || 0, $obs[20] || 0),
+  // 3. Body Angular Velocity (omega_B in Body FLU) [6:9]
+  const omega_B = {
+    wx: $obs[6] || 0.0,
+    wy: $obs[7] || 0.0,
+    wz: $obs[8] || 0.0,
+    wxDeg: ($obs[6] || 0.0) * (180.0 / Math.PI),
+    wyDeg: ($obs[7] || 0.0) * (180.0 / Math.PI),
+    wzDeg: ($obs[8] || 0.0) * (180.0 / Math.PI),
   };
 
-  // 4. Next Gate 15D [21:36]
-  const isZero = $obs.slice(21, 36).every((v) => Math.abs(v) < 1e-5);
+  // 4. Active Gate 15D [9:24]
+  const active_gate = {
+    tl: [$obs[9] || 0.0, $obs[10] || 0.0, $obs[11] || 0.0],
+    tr: [$obs[12] || 0.0, $obs[13] || 0.0, $obs[14] || 0.0],
+    bl: [$obs[15] || 0.0, $obs[16] || 0.0, $obs[17] || 0.0],
+    br: [$obs[18] || 0.0, $obs[19] || 0.0, $obs[20] || 0.0],
+    center: [$obs[21] || 0.0, $obs[22] || 0.0, $obs[23] || 0.0],
+    dist: Math.hypot($obs[21] || 0, $obs[22] || 0, $obs[23] || 0),
+  };
+
+  // 5. Next Gate 15D [24:39]
+  const isZero = $obs.slice(24, 39).every((v) => Math.abs(v) < 1e-5);
   const next_gate = {
     has_next: !isZero,
-    tl: [$obs[21] || 0.0, $obs[22] || 0.0, $obs[23] || 0.0],
-    tr: [$obs[24] || 0.0, $obs[25] || 0.0, $obs[26] || 0.0],
-    bl: [$obs[27] || 0.0, $obs[28] || 0.0, $obs[29] || 0.0],
-    br: [$obs[30] || 0.0, $obs[31] || 0.0, $obs[32] || 0.0],
-    center: [$obs[33] || 0.0, $obs[34] || 0.0, $obs[35] || 0.0],
-    dist: Math.hypot($obs[33] || 0, $obs[34] || 0, $obs[35] || 0),
+    tl: [$obs[24] || 0.0, $obs[25] || 0.0, $obs[26] || 0.0],
+    tr: [$obs[27] || 0.0, $obs[28] || 0.0, $obs[29] || 0.0],
+    bl: [$obs[30] || 0.0, $obs[31] || 0.0, $obs[32] || 0.0],
+    br: [$obs[33] || 0.0, $obs[34] || 0.0, $obs[35] || 0.0],
+    center: [$obs[36] || 0.0, $obs[37] || 0.0, $obs[38] || 0.0],
+    dist: Math.hypot($obs[36] || 0, $obs[37] || 0, $obs[38] || 0),
   };
 
-  // 5. Previous Action [36:40]
+  // 6. Previous Action (3D) [39:42]
   const prev_action = {
-    vfwd: $obs[36] || 0.0,
-    vleft: $obs[37] || 0.0,
-    vup: $obs[38] || 0.0,
-    yawRate: $obs[39] || 0.0,
-    yawRateDeg: ($obs[39] || 0.0) * (180.0 / Math.PI),
+    vfwd: $obs[39] || 0.0,
+    vleft: $obs[40] || 0.0,
+    yawRate: $obs[41] || 0.0,
+    yawRateDeg: ($obs[41] || 0.0) * (180.0 / Math.PI),
   };
 
-  return { vel_B, grav_B, active_gate, next_gate, prev_action };
+  return { vel_B, grav_B, omega_B, active_gate, next_gate, prev_action };
 });
 
-// Raw 4D Action Array
-export const rawAction = writable([0.0, 0.0, 0.0, 0.0]);
+// Raw 3D Action Array [v_fwd, v_left, yaw_rate]
+export const rawAction = writable([0.0, 0.0, 0.0]);
 
 // Structured Action Derived Store
 export const structuredAction = derived(rawAction, ($act) => {
   const vfwd = $act[0] || 0.0;
   const vleft = $act[1] || 0.0;
-  const vup = $act[2] || 0.0;
-  const yawRate = $act[3] || 0.0;
+  const yawRate = $act[2] || 0.0;
   return {
     vfwd,
     vleft,
-    vup,
     yawRate,
     yawRateDeg: yawRate * (180.0 / Math.PI),
-    totalSpeed: Math.hypot(vfwd, vleft, vup),
+    totalSpeed: Math.hypot(vfwd, vleft),
   };
 });
 
 // Reset Action and Observation space telemetry to zero
 export function resetPolicyTelemetry() {
-  rawObservation.set(new Array(40).fill(0.0));
-  rawAction.set([0.0, 0.0, 0.0, 0.0]);
+  rawObservation.set(new Array(42).fill(0.0));
+  rawAction.set([0.0, 0.0, 0.0]);
 }
 
 export const serviceResponseLog = writable([]);
@@ -255,8 +262,8 @@ function subscribeTopics() {
     if (msg?.data) {
       const stateUpper = msg.data.toUpperCase();
       controllerFsmState.set(stateUpper);
-      if (stateUpper === 'HOVER' || stateUpper === 'OFF' || stateUpper === 'LANDING' || stateUpper === 'FREE') {
-        resetPolicyTelemetry();
+      if (stateUpper === 'OFF' || stateUpper === 'LANDING') {
+        rawAction.set([0.0, 0.0, 0.0]);
       }
     }
   });
@@ -404,27 +411,26 @@ function subscribeTopics() {
     }
   });
 
-  // 6. Policy Observation (40D)
+  // 6. Policy Observation (42D)
   const obsSub = new ROSLIB.Topic({
     ros,
     name: '/policy/observation',
     messageType: 'std_msgs/msg/Float64MultiArray',
   });
   obsSub.subscribe((msg) => {
-    if (msg.data && msg.data.length >= 40) {
+    if (msg?.data && msg.data.length >= 42) {
       rawObservation.set(msg.data);
-      structuredObservation.set(parseObservation40D(msg.data));
     }
   });
 
-  // 7. Policy Action (4D)
+  // 7. Policy Action (3D)
   const actSub = new ROSLIB.Topic({
     ros,
     name: '/policy/action',
     messageType: 'std_msgs/msg/Float64MultiArray',
   });
   actSub.subscribe((msg) => {
-    if (msg.data && msg.data.length >= 4) {
+    if (msg?.data && msg.data.length >= 3) {
       rawAction.set(msg.data);
     }
   });

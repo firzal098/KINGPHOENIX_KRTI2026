@@ -112,7 +112,7 @@ class GatePerceptionNode(Node):
         self.declare_parameter('conf_threshold', 0.7)
         self.declare_parameter('corner_conf_threshold', 0.20)
         self.declare_parameter('iou_threshold', 0.45)
-        self.declare_parameter('gate_width_m', 2.0)
+        self.declare_parameter('gate_width_m', 1.9)
         self.declare_parameter('gate_height_m', 2.0)
         self.declare_parameter('publish_debug_image', True)
 

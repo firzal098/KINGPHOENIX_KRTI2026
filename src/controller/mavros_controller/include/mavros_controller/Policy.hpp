@@ -14,6 +14,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <mavros_msgs/msg/position_target.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 
@@ -25,11 +26,13 @@ public:
     Policy()
     : current_gate_target_index_(0),
       prev_dot_product_(1.0),
-      has_prev_dot_(false),
+      has_prev_drone_pos_(false),
+      has_imu_(false),
       onnx_loaded_(false)
     {
         observation_vector_.fill(0.0);
         prev_action_.fill(0.0);
+        prev_drone_pos_.fill(0.0);
     }
 
     /**
@@ -58,11 +61,16 @@ public:
             "/mavros/local_position/velocity_local", qos_best_effort,
             std::bind(&Policy::localVelCallback, this, std::placeholders::_1));
 
-        // 4. Telemetry Publishers for Observation (28D) and Action Space (4D)
+        // 4. Subscribe to /mavros/imu/data for Body Angular Velocity (omega_b in FLU)
+        imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
+            "/mavros/imu/data", qos_best_effort,
+            std::bind(&Policy::imuCallback, this, std::placeholders::_1));
+
+        // 5. Telemetry Publishers for Observation (42D) and Action Space (3D)
         pub_obs_ = node_->create_publisher<std_msgs::msg::Float64MultiArray>("/policy/observation", 10);
         pub_action_ = node_->create_publisher<std_msgs::msg::Float64MultiArray>("/policy/action", 10);
 
-        // 5. Initialize ONNX Runtime Session
+        // 6. Initialize ONNX Runtime Session
         try {
             env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "PureJaxRL_Policy");
             session_options_ = std::make_unique<Ort::SessionOptions>();
@@ -132,15 +140,16 @@ public:
     }
 
     /**
-     * @brief Computes 40D observation space vector precisely matching crazyflow_gate_env.py specification.
+     * @brief Computes 42D observation space vector precisely matching crazyflow_gate_env.py specification.
      * Layout:
      *   [0:3]   vel_B: Linear velocity in Body FLU frame [v_fwd, v_left, v_up]
      *   [3:6]   grav_B: Projected gravity vector in Body FLU frame [r20, r21, r22]
-     *   [6:21]  active_gate_15D: Relative active gate corners & center in Body FLU frame [c_tl, c_tr, c_bl, c_br, p_gate]
-     *   [21:36] next_gate_15D: Relative next gate preview corners & center in Body FLU frame (or 0 if last gate)
-     *   [36:40] prev_action: Previous 4D control action [v_fwd, v_left, v_up, yaw_rate]
+     *   [6:9]   omega_B: Angular velocity in Body FLU frame [roll_rate, pitch_rate, yaw_rate]
+     *   [9:24]  active_gate_15D: Relative active gate corners & center in Body FLU frame [c_tl, c_tr, c_bl, c_br, p_gate]
+     *   [24:39] next_gate_15D: Relative next gate preview corners & center in Body FLU frame (or 0 if last gate)
+     *   [39:42] prev_action: Previous 3D control action [v_fwd, v_left, yaw_rate]
      */
-    const std::array<double, 40>& get_observation_spaces()
+    const std::array<double, 42>& get_observation_spaces()
     {
         // 1. Body Linear Velocity in FLU [0:3]
         double vx_W = current_local_vel_.twist.linear.x;
@@ -173,6 +182,22 @@ public:
         observation_vector_[4] = r21; // grav_B.y
         observation_vector_[5] = r22; // grav_B.z
 
+        // 3. Body Angular Velocity (omega_B) in Body FLU [6:9]
+        if (has_imu_) {
+            observation_vector_[6] = current_imu_.angular_velocity.x; // Roll rate (p)
+            observation_vector_[7] = current_imu_.angular_velocity.y; // Pitch rate (q)
+            observation_vector_[8] = current_imu_.angular_velocity.z; // Yaw rate (r)
+        } else {
+            // Fallback from twist.angular if IMU data not yet received
+            double wx_W = current_local_vel_.twist.angular.x;
+            double wy_W = current_local_vel_.twist.angular.y;
+            double wz_W = current_local_vel_.twist.angular.z;
+            auto omega_flu = transformWorldENUtoBodyFLU(wx_W, wy_W, wz_W);
+            observation_vector_[6] = omega_flu[0];
+            observation_vector_[7] = omega_flu[1];
+            observation_vector_[8] = omega_flu[2];
+        }
+
         // Drone current position in World ENU
         double px = current_local_pose_.pose.position.x;
         double py = current_local_pose_.pose.position.y;
@@ -181,7 +206,7 @@ public:
         const double half_w = 0.75;
         const double half_h = 0.75;
 
-        // 3. Active Gate 15D Features in Body FLU [6:21]
+        // 4. Active Gate 15D Features in Body FLU [9:24]
         geometry_msgs::msg::Pose gate_pose;
         if (!current_gate_poses_.poses.empty() && current_gate_target_index_ < current_gate_poses_.poses.size()) {
             gate_pose = current_gate_poses_.poses[current_gate_target_index_];
@@ -240,32 +265,32 @@ public:
         auto c_br_flu = transformWorldENUtoBodyFLU(c_br_x - px, c_br_y - py, c_br_z - pz);
         auto p_gate_flu = transformWorldENUtoBodyFLU(gate_pose.position.x - px, gate_pose.position.y - py, gate_pose.position.z - pz);
 
-        // Top-Left [6:9]
-        observation_vector_[6]  = c_tl_flu[0];
-        observation_vector_[7]  = c_tl_flu[1];
-        observation_vector_[8]  = c_tl_flu[2];
+        // Top-Left [9:12]
+        observation_vector_[9]  = c_tl_flu[0];
+        observation_vector_[10] = c_tl_flu[1];
+        observation_vector_[11] = c_tl_flu[2];
 
-        // Top-Right [9:12]
-        observation_vector_[9]  = c_tr_flu[0];
-        observation_vector_[10] = c_tr_flu[1];
-        observation_vector_[11] = c_tr_flu[2];
+        // Top-Right [12:15]
+        observation_vector_[12] = c_tr_flu[0];
+        observation_vector_[13] = c_tr_flu[1];
+        observation_vector_[14] = c_tr_flu[2];
 
-        // Bottom-Left [12:15]
-        observation_vector_[12] = c_bl_flu[0];
-        observation_vector_[13] = c_bl_flu[1];
-        observation_vector_[14] = c_bl_flu[2];
+        // Bottom-Left [15:18]
+        observation_vector_[15] = c_bl_flu[0];
+        observation_vector_[16] = c_bl_flu[1];
+        observation_vector_[17] = c_bl_flu[2];
 
-        // Bottom-Right [15:18]
-        observation_vector_[15] = c_br_flu[0];
-        observation_vector_[16] = c_br_flu[1];
-        observation_vector_[17] = c_br_flu[2];
+        // Bottom-Right [18:21]
+        observation_vector_[18] = c_br_flu[0];
+        observation_vector_[19] = c_br_flu[1];
+        observation_vector_[20] = c_br_flu[2];
 
-        // Relative Gate Center [18:21]
-        observation_vector_[18] = p_gate_flu[0];
-        observation_vector_[19] = p_gate_flu[1];
-        observation_vector_[20] = p_gate_flu[2];
+        // Relative Gate Center [21:24]
+        observation_vector_[21] = p_gate_flu[0];
+        observation_vector_[22] = p_gate_flu[1];
+        observation_vector_[23] = p_gate_flu[2];
 
-        // 4. Next Gate Preview 15D Features in Body FLU [21:36]
+        // 5. Next Gate Preview 15D Features in Body FLU [24:39]
         size_t next_gate_idx = current_gate_target_index_ + 1;
         bool has_next = (!current_gate_poses_.poses.empty() && next_gate_idx < current_gate_poses_.poses.size());
 
@@ -307,7 +332,7 @@ public:
 
             double nc_br_x = next_gate_pose.position.x + half_w * nlat_x - half_h * nvert_x;
             double nc_br_y = next_gate_pose.position.y + half_w * nlat_y - half_h * nvert_y;
-            double nc_br_z = next_gate_pose.position.z + half_w * nlat_z - half_h * nvert_z;
+            double nc_br_z = next_gate_pose.position.z - half_w * nlat_z - half_h * nvert_z;
 
             auto nc_tl_flu = transformWorldENUtoBodyFLU(nc_tl_x - px, nc_tl_y - py, nc_tl_z - pz);
             auto nc_tr_flu = transformWorldENUtoBodyFLU(nc_tr_x - px, nc_tr_y - py, nc_tr_z - pz);
@@ -315,63 +340,62 @@ public:
             auto nc_br_flu = transformWorldENUtoBodyFLU(nc_br_x - px, nc_br_y - py, nc_br_z - pz);
             auto np_gate_flu = transformWorldENUtoBodyFLU(next_gate_pose.position.x - px, next_gate_pose.position.y - py, next_gate_pose.position.z - pz);
 
-            // Next Gate Top-Left [21:24]
-            observation_vector_[21] = nc_tl_flu[0];
-            observation_vector_[22] = nc_tl_flu[1];
-            observation_vector_[23] = nc_tl_flu[2];
+            // Next Gate Top-Left [24:27]
+            observation_vector_[24] = nc_tl_flu[0];
+            observation_vector_[25] = nc_tl_flu[1];
+            observation_vector_[26] = nc_tl_flu[2];
 
-            // Next Gate Top-Right [24:27]
-            observation_vector_[24] = nc_tr_flu[0];
-            observation_vector_[25] = nc_tr_flu[1];
-            observation_vector_[26] = nc_tr_flu[2];
+            // Next Gate Top-Right [27:30]
+            observation_vector_[27] = nc_tr_flu[0];
+            observation_vector_[28] = nc_tr_flu[1];
+            observation_vector_[29] = nc_tr_flu[2];
 
-            // Next Gate Bottom-Left [27:30]
-            observation_vector_[27] = nc_bl_flu[0];
-            observation_vector_[28] = nc_bl_flu[1];
-            observation_vector_[29] = nc_bl_flu[2];
+            // Next Gate Bottom-Left [30:33]
+            observation_vector_[30] = nc_bl_flu[0];
+            observation_vector_[31] = nc_bl_flu[1];
+            observation_vector_[32] = nc_bl_flu[2];
 
-            // Next Gate Bottom-Right [30:33]
-            observation_vector_[30] = nc_br_flu[0];
-            observation_vector_[31] = nc_br_flu[1];
-            observation_vector_[32] = nc_br_flu[2];
+            // Next Gate Bottom-Right [33:36]
+            observation_vector_[33] = nc_br_flu[0];
+            observation_vector_[34] = nc_br_flu[1];
+            observation_vector_[35] = nc_br_flu[2];
 
-            // Next Gate Center [33:36]
-            observation_vector_[33] = np_gate_flu[0];
-            observation_vector_[34] = np_gate_flu[1];
-            observation_vector_[35] = np_gate_flu[2];
+            // Next Gate Center [36:39]
+            observation_vector_[36] = np_gate_flu[0];
+            observation_vector_[37] = np_gate_flu[1];
+            observation_vector_[38] = np_gate_flu[2];
         } else {
-            for (size_t i = 21; i < 36; ++i) {
+            for (size_t i = 24; i < 39; ++i) {
                 observation_vector_[i] = 0.0;
             }
         }
 
-        // 5. Previous Control Action in Body FLU [36:40]
-        observation_vector_[36] = prev_action_[0]; // v_fwd_cmd
-        observation_vector_[37] = prev_action_[1]; // v_left_cmd
-        observation_vector_[38] = prev_action_[2]; // v_up_cmd
-        observation_vector_[39] = prev_action_[3]; // yaw_rate_cmd
+        // 6. Previous Control Action in Body FLU [39:42]
+        observation_vector_[39] = prev_action_[0]; // v_fwd_cmd
+        observation_vector_[40] = prev_action_[1]; // v_left_cmd
+        observation_vector_[41] = prev_action_[2]; // yaw_rate_cmd
 
         return observation_vector_;
     }
 
     /**
-     * @brief Computes 4D Action Space [v_fwd, v_left, v_up, yaw_rate] in Body FLU using ONNX policy.
+     * @brief Computes 3D Action Space [v_fwd, v_left, yaw_rate] in Body FLU using ONNX policy.
      * Applies action bound clamping matching training limits.
      */
-    std::array<double, 4> get_action_spaces()
+    std::array<double, 3> get_action_spaces()
     {
         if (!onnx_loaded_ || !session_) {
             RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000, "ONNX model not loaded. Returning zero actions.");
-            return {0.0, 0.0, 0.0, 0.0};
+            return {0.0, 0.0, 0.0};
         }
 
-        // Convert double 40D observation array to float tensor
-        std::array<float, 40> input_tensor_values;
-        for (size_t i = 0; i < 40; ++i) {
+        // Convert double 42D observation array to float tensor
+        std::array<float, 42> input_tensor_values;
+        for (size_t i = 0; i < 42; ++i) {
             input_tensor_values[i] = static_cast<float>(observation_vector_[i]);
         }
 
-        std::array<int64_t, 2> input_shape = {1, 40};
+        std::array<int64_t, 2> input_shape = {1, 42};
 
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
             memory_info_, input_tensor_values.data(), input_tensor_values.size(),
@@ -390,14 +414,12 @@ public:
 
             double raw_vfwd     = static_cast<double>(output_data[0]);
             double raw_vleft    = static_cast<double>(output_data[1]);
-            double raw_vup      = static_cast<double>(output_data[2]);
-            double raw_yaw_rate = static_cast<double>(output_data[3]);
+            double raw_yaw_rate = static_cast<double>(output_data[2]);
 
-            // Clamp to environment action boundaries [-4..16], [-8..8], [-6..6], [-9.42..9.42]
+            // Clamp to environment action boundaries [-4..16], [-8..8], [-15.71..15.71]
             prev_action_[0] = std::clamp(raw_vfwd,     -4.0,  16.0);
             prev_action_[1] = std::clamp(raw_vleft,    -8.0,   8.0);
-            prev_action_[2] = std::clamp(raw_vup,      -6.0,   6.0);
-            prev_action_[3] = std::clamp(raw_yaw_rate, -9.424778, 9.424778);
+            prev_action_[2] = std::clamp(raw_yaw_rate, -15.707963, 15.707963);
         }
         catch (const std::exception& e) {
             RCLCPP_ERROR(node_->get_logger(), "ONNX Inference step failed: %s", e.what());
@@ -407,7 +429,8 @@ public:
     }
 
     /**
-     * @brief Evaluates whether the drone has passed the active target gate plane using dot product.
+     * @brief Evaluates whether the drone has passed the active target gate plane.
+     * Uses robust bidirectional ray-plane intersection and proximity fallback.
      */
     void checkGatePassage()
     {
@@ -417,7 +440,7 @@ public:
 
         const auto& gate_pose = current_gate_poses_.poses[current_gate_target_index_];
 
-        // Gate Yaw & Normal Vector n_gate in World ENU Frame
+        // 1. Extract Gate Normal Vector directly from Pose Quaternion: R_gate * [1, 0, 0]^T
         double gw = gate_pose.orientation.w;
         double gx = gate_pose.orientation.x;
         double gy = gate_pose.orientation.y;
@@ -429,37 +452,84 @@ public:
             gw = 1.0; gx = 0.0; gy = 0.0; gz = 0.0;
         }
 
-        double gate_yaw = std::atan2(2.0 * (gw * gz + gx * gy), 1.0 - 2.0 * (gy * gy + gz * gz));
+        // Gate unit normal vector in World ENU (forward axis of gate frame)
+        double nx = 1.0 - 2.0 * (gy * gy + gz * gz);
+        double ny = 2.0 * (gx * gy + gw * gz);
+        double nz = 2.0 * (gx * gz - gw * gy);
 
-        // Entrance normal vector n_gate = [-cos(yaw), -sin(yaw), 0]
-        double nx = -std::cos(gate_yaw);
-        double ny = -std::sin(gate_yaw);
-        double nz = 0.0;
+        // Drone current position relative to gate center
+        double px = current_local_pose_.pose.position.x;
+        double py = current_local_pose_.pose.position.y;
+        double pz = current_local_pose_.pose.position.z;
 
-        // Drone position relative to target gate center
-        double dx = current_local_pose_.pose.position.x - gate_pose.position.x;
-        double dy = current_local_pose_.pose.position.y - gate_pose.position.y;
-        double dz = current_local_pose_.pose.position.z - gate_pose.position.z;
+        double dx = px - gate_pose.position.x;
+        double dy = py - gate_pose.position.y;
+        double dz = pz - gate_pose.position.z;
 
-        // Dot product representing signed plane distance
         double curr_dot = dx * nx + dy * ny + dz * nz;
         double dist_to_center = std::sqrt(dx * dx + dy * dy + dz * dz);
 
-        if (!has_prev_dot_) {
+        if (!has_prev_drone_pos_) {
+            prev_drone_pos_ = {px, py, pz};
             prev_dot_product_ = curr_dot;
-            has_prev_dot_ = true;
+            has_prev_drone_pos_ = true;
             return;
         }
 
-        // Plane crossing condition: dot product transitions from positive (front) to negative (behind)
-        if (prev_dot_product_ > 0.0 && curr_dot <= 0.0 && dist_to_center < 3.5) {
+        // 2. Continuous Ray-Plane Segment Crossing Detection:
+        // Segment from p_prev to p_curr crosses the plane if s_prev and s_curr have opposite signs
+        double s_prev = prev_dot_product_;
+        double s_curr = curr_dot;
+
+        bool sign_flip = (s_prev * s_curr <= 0.0) && (std::abs(s_prev - s_curr) > 1e-4);
+        bool passed = false;
+
+        if (sign_flip && dist_to_center < 3.5) {
+            // Interpolate exact crossing point
+            double denom = s_prev - s_curr;
+            double t = (std::abs(denom) > 1e-6) ? std::clamp(s_prev / denom, 0.0, 1.0) : 0.5;
+            double cx = prev_drone_pos_[0] + t * (px - prev_drone_pos_[0]) - gate_pose.position.x;
+            double cy = prev_drone_pos_[1] + t * (py - prev_drone_pos_[1]) - gate_pose.position.y;
+            double cz = prev_drone_pos_[2] + t * (pz - prev_drone_pos_[2]) - gate_pose.position.z;
+            double cross_dist = std::sqrt(cx * cx + cy * cy + cz * cz);
+
+            if (cross_dist < 2.5) {
+                passed = true;
+            }
+        }
+
+        // 3. Proximity Fallback: Drone came within 1.2m of gate center and is now flying away
+        double vx = current_local_vel_.twist.linear.x;
+        double vy = current_local_vel_.twist.linear.y;
+        double vz = current_local_vel_.twist.linear.z;
+        double radial_vel = (dx * vx + dy * vy + dz * vz); // > 0 means moving away from gate center
+        if (dist_to_center < 1.20 && radial_vel > 0.0) {
+            passed = true;
+        }
+
+        if (passed) {
             RCLCPP_INFO(node_->get_logger(), 
-                "Successfully PASSED Gate #%zu! Advancing target to next gate.", current_gate_target_index_);
+                "Successfully PASSED Gate #%zu! (Dist: %.2fm). Advancing target to next gate.", 
+                current_gate_target_index_ + 1, dist_to_center);
             current_gate_target_index_++;
-            prev_dot_product_ = 1.0;
-            has_prev_dot_ = false; // Reset first-frame latch for next gate
+            has_prev_drone_pos_ = false;
         } else {
             prev_dot_product_ = curr_dot;
+            prev_drone_pos_ = {px, py, pz};
+        }
+    }
+
+    /**
+     * @brief Computes 42D observation space and publishes to /policy/observation telemetry topic.
+     * Can be called anytime (both in RUN and non-RUN states) to keep live telemetry updating.
+     */
+    void publishObservation()
+    {
+        get_observation_spaces();
+        if (pub_obs_) {
+            std_msgs::msg::Float64MultiArray obs_msg;
+            obs_msg.data.assign(observation_vector_.begin(), observation_vector_.end());
+            pub_obs_->publish(obs_msg);
         }
     }
 
@@ -469,30 +539,23 @@ public:
      */
     mavros_msgs::msg::PositionTarget step()
     {
-        // 1. Compute 40D Observation Vector
-        get_observation_spaces();
+        // 1. Compute 42D Observation Vector & Publish Telemetry
+        publishObservation();
 
-        // 2. Publish Observation Telemetry (40D) to /policy/observation
-        if (pub_obs_ && pub_obs_->get_subscription_count() > 0) {
-            std_msgs::msg::Float64MultiArray obs_msg;
-            obs_msg.data.assign(observation_vector_.begin(), observation_vector_.end());
-            pub_obs_->publish(obs_msg);
-        }
-
-        // 3. Compute 4D Action Vector via ONNX model (in Body FLU)
+        // 2. Compute 3D Action Vector via ONNX model (in Body FLU)
         auto action = get_action_spaces();
 
-        // 4. Publish Action Telemetry (4D) to /policy/action
-        if (pub_action_ && pub_action_->get_subscription_count() > 0) {
+        // 3. Publish Action Telemetry (3D) to /policy/action
+        if (pub_action_) {
             std_msgs::msg::Float64MultiArray action_msg;
             action_msg.data.assign(action.begin(), action.end());
             pub_action_->publish(action_msg);
         }
 
-        // 5. Evaluate gate passing logic
+        // 4. Evaluate gate passing logic
         checkGatePassage();
 
-        // 6. Construct MAVROS setpoint_raw PositionTarget message in Earth Frame (FRAME_LOCAL_NED)
+        // 5. Construct MAVROS setpoint_raw PositionTarget message in Earth Frame (FRAME_LOCAL_NED)
         mavros_msgs::msg::PositionTarget setpoint;
         setpoint.header.stamp = node_->now();
         setpoint.header.frame_id = "map";
@@ -501,7 +564,7 @@ public:
         setpoint.coordinate_frame = mavros_msgs::msg::PositionTarget::FRAME_LOCAL_NED;
 
         // Type Mask: Ignore horizontal Position (X, Y), all Acceleration, and Yaw Angle.
-        // Enforce closed-loop Altitude Hold at Position Z (target_z = 1.05m / gate center height).
+        // Enforce closed-loop Altitude Hold at Position Z or fixed velocity.
         setpoint.type_mask = mavros_msgs::msg::PositionTarget::IGNORE_PX |
                              mavros_msgs::msg::PositionTarget::IGNORE_PY |
                              mavros_msgs::msg::PositionTarget::IGNORE_AFX |
@@ -564,14 +627,12 @@ public:
         }
 
         // Commanded targets streamed to MAVROS
-        // setpoint.position.z = target_z;just disabling this temporarily
         setpoint.velocity.x = filtered_vx_;
         setpoint.velocity.y = filtered_vy_;
-        // setpoint.velocity.z = action[2]; just disabling this temporarily
-        setpoint.velocity.z = 0;
+        setpoint.velocity.z = 0.0;
 
         // Yaw rate (CCW positive in FLU/ENU)
-        setpoint.yaw_rate = action[3];
+        setpoint.yaw_rate = action[2];
 
         return setpoint;
     }
@@ -585,18 +646,20 @@ public:
         filtered_vx_ = 0.0;
         filtered_vy_ = 0.0;
         filtered_vz_ = 0.0;
-        prev_action_ = {0.0, 0.0, 0.0, 0.0};
-        has_prev_dot_ = false;
+        prev_action_ = {0.0, 0.0, 0.0};
+        observation_vector_.fill(0.0);
+        has_prev_drone_pos_ = false;
+        prev_drone_pos_.fill(0.0);
     }
 
     // Getters and Setters
     size_t getTargetGateIndex() const { return current_gate_target_index_; }
     void setTargetGateIndex(size_t index) {
         current_gate_target_index_ = index;
-        has_prev_dot_ = false;
+        has_prev_drone_pos_ = false;
         prev_dot_product_ = 1.0;
     }
-    const std::array<double, 40>& getObservationVector() const { return observation_vector_; }
+    const std::array<double, 42>& getObservationVector() const { return observation_vector_; }
 
 private:
     void gatePosesCallback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
@@ -614,10 +677,17 @@ private:
         current_local_vel_ = *msg;
     }
 
+    void imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg)
+    {
+        current_imu_ = *msg;
+        has_imu_ = true;
+    }
+
     rclcpp::Node* node_{nullptr};
     size_t current_gate_target_index_{0};
     double prev_dot_product_{1.0};
-    bool has_prev_dot_{false};
+    bool has_prev_drone_pos_{false};
+    std::array<double, 3> prev_drone_pos_{};
 
     double filtered_vx_{0.0};
     double filtered_vy_{0.0};
@@ -627,9 +697,11 @@ private:
     geometry_msgs::msg::PoseArray current_gate_poses_;
     geometry_msgs::msg::PoseStamped current_local_pose_;
     geometry_msgs::msg::TwistStamped current_local_vel_;
+    sensor_msgs::msg::Imu current_imu_;
+    bool has_imu_{false};
 
-    std::array<double, 40> observation_vector_{};
-    std::array<double, 4> prev_action_{};
+    std::array<double, 42> observation_vector_{};
+    std::array<double, 3> prev_action_{};
 
     // ONNX Runtime Session Members
     std::unique_ptr<Ort::Env> env_;
@@ -643,6 +715,7 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr gate_poses_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr local_pose_sub_;
     rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr local_vel_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
 
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pub_obs_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pub_action_;

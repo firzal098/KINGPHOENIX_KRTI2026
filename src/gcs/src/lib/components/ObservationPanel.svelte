@@ -34,12 +34,12 @@
           <line x1="15" y1="20" x2="15" y2="23"/>
         </svg>
       </span>
-      <span class="font-hud">OBSERVATION SPACE (40D)</span>
+      <span class="font-hud">OBSERVATION SPACE (42D)</span>
     </div>
 
     <div class="header-tools">
       <button class="raw-toggle {showRaw ? 'active' : ''}" on:click={() => (showRaw = !showRaw)}>
-        {showRaw ? 'GROUPED VIEW' : 'RAW 40D ARRAY'}
+        {showRaw ? 'GROUPED VIEW' : 'RAW 42D ARRAY'}
       </button>
     </div>
   </div>
@@ -114,13 +114,42 @@
         </div>
       </div>
 
-      <!-- 3. Active Gate 15D Features -->
+      <!-- 3. Body Angular Velocity (omega_B) -->
+      <div class="sub-card">
+        <div class="sub-header font-hud">
+          <span class="sub-dot amber"></span>
+          <span>3. BODY ANGULAR VELOCITY (omega_B)</span>
+          <span class="dim-tag font-mono">3D [6:9]</span>
+        </div>
+        <div class="coords-row">
+          <div class="coord-item">
+            <span class="coord-lbl">w_x (Roll Rate / p)</span>
+            <span class="val-pill {getValClass($structuredObservation.omega_B?.wx)}">
+              {fmt($structuredObservation.omega_B?.wx)} <small>rad/s</small>
+            </span>
+          </div>
+          <div class="coord-item">
+            <span class="coord-lbl">w_y (Pitch Rate / q)</span>
+            <span class="val-pill {getValClass($structuredObservation.omega_B?.wy)}">
+              {fmt($structuredObservation.omega_B?.wy)} <small>rad/s</small>
+            </span>
+          </div>
+          <div class="coord-item">
+            <span class="coord-lbl">w_z (Yaw Rate / r)</span>
+            <span class="val-pill {getValClass($structuredObservation.omega_B?.wz)}">
+              {fmt($structuredObservation.omega_B?.wz)} <small>rad/s</small>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4. Active Gate 15D Features -->
       <div class="sub-card gate-card active-gate-border">
         <div class="sub-header font-hud">
           <div class="gate-header-left">
             <span class="sub-dot green"></span>
-            <span>3. ACTIVE: {$targetGateLabel}</span>
-            <span class="dim-tag font-mono">15D [6:21]</span>
+            <span>4. ACTIVE: {$targetGateLabel}</span>
+            <span class="dim-tag font-mono">15D [9:24]</span>
           </div>
 
           <div class="gate-quick-switcher font-hud">
@@ -143,7 +172,7 @@
         <div class="gate-points-list font-mono">
           <!-- Gate Center -->
           <div class="gate-point-row highlight-center">
-            <span class="point-name font-hud">GATE CENTER [18:21]</span>
+            <span class="point-name font-hud">GATE CENTER [21:24]</span>
             <div class="xyz-box">
               <span class="axis">X:</span> <span class="num {getValClass($structuredObservation.active_gate.center[0])}">{fmt($structuredObservation.active_gate.center[0])}</span>
               <span class="axis">Y:</span> <span class="num {getValClass($structuredObservation.active_gate.center[1])}">{fmt($structuredObservation.active_gate.center[1])}</span>
@@ -153,7 +182,7 @@
 
           <!-- Top-Left Corner -->
           <div class="gate-point-row">
-            <span class="point-name">Top-Left Corner [6:9]</span>
+            <span class="point-name">Top-Left Corner [9:12]</span>
             <div class="xyz-box">
               <span class="axis">X:</span> <span class="num {getValClass($structuredObservation.active_gate.tl[0])}">{fmt($structuredObservation.active_gate.tl[0])}</span>
               <span class="axis">Y:</span> <span class="num {getValClass($structuredObservation.active_gate.tl[1])}">{fmt($structuredObservation.active_gate.tl[1])}</span>
@@ -163,7 +192,7 @@
 
           <!-- Top-Right Corner -->
           <div class="gate-point-row">
-            <span class="point-name">Top-Right Corner [9:12]</span>
+            <span class="point-name">Top-Right Corner [12:15]</span>
             <div class="xyz-box">
               <span class="axis">X:</span> <span class="num {getValClass($structuredObservation.active_gate.tr[0])}">{fmt($structuredObservation.active_gate.tr[0])}</span>
               <span class="axis">Y:</span> <span class="num {getValClass($structuredObservation.active_gate.tr[1])}">{fmt($structuredObservation.active_gate.tr[1])}</span>
@@ -173,7 +202,7 @@
 
           <!-- Bottom-Left Corner -->
           <div class="gate-point-row">
-            <span class="point-name">Bottom-Left Corner [12:15]</span>
+            <span class="point-name">Bottom-Left Corner [15:18]</span>
             <div class="xyz-box">
               <span class="axis">X:</span> <span class="num {getValClass($structuredObservation.active_gate.bl[0])}">{fmt($structuredObservation.active_gate.bl[0])}</span>
               <span class="axis">Y:</span> <span class="num {getValClass($structuredObservation.active_gate.bl[1])}">{fmt($structuredObservation.active_gate.bl[1])}</span>
@@ -183,7 +212,7 @@
 
           <!-- Bottom-Right Corner -->
           <div class="gate-point-row">
-            <span class="point-name">Bottom-Right Corner [15:18]</span>
+            <span class="point-name">Bottom-Right Corner [18:21]</span>
             <div class="xyz-box">
               <span class="axis">X:</span> <span class="num {getValClass($structuredObservation.active_gate.br[0])}">{fmt($structuredObservation.active_gate.br[0])}</span>
               <span class="axis">Y:</span> <span class="num {getValClass($structuredObservation.active_gate.br[1])}">{fmt($structuredObservation.active_gate.br[1])}</span>
@@ -193,13 +222,13 @@
         </div>
       </div>
 
-      <!-- 4. Next Gate Preview 15D Features -->
+      <!-- 5. Next Gate Preview 15D Features -->
       <div class="sub-card gate-card">
         <div class="sub-header font-hud">
           <div class="gate-header-left">
             <span class="sub-dot amber"></span>
-            <span>4. NEXT PREVIEW: {$targetGateIndex < 4 ? `GATE #${$targetGateIndex + 2}` : 'NONE (FINAL GATE)'}</span>
-            <span class="dim-tag font-mono">15D [21:36]</span>
+            <span>5. NEXT PREVIEW: {$targetGateIndex < 4 ? `GATE #${$targetGateIndex + 2}` : 'NONE (FINAL GATE)'}</span>
+            <span class="dim-tag font-mono">15D [24:39]</span>
           </div>
           {#if $structuredObservation.next_gate.has_next}
             <span class="badge badge-green">IN VIEW</span>
@@ -211,7 +240,7 @@
         <div class="gate-points-list font-mono {$structuredObservation.next_gate.has_next ? '' : 'faded'}">
           <!-- Next Center -->
           <div class="gate-point-row highlight-center">
-            <span class="point-name font-hud">NEXT CENTER [33:36]</span>
+            <span class="point-name font-hud">NEXT CENTER [36:39]</span>
             <div class="xyz-box">
               <span class="axis">X:</span> <span class="num {getValClass($structuredObservation.next_gate.center[0])}">{fmt($structuredObservation.next_gate.center[0])}</span>
               <span class="axis">Y:</span> <span class="num {getValClass($structuredObservation.next_gate.center[1])}">{fmt($structuredObservation.next_gate.center[1])}</span>
@@ -221,7 +250,7 @@
 
           <!-- Next TL -->
           <div class="gate-point-row">
-            <span class="point-name">Next Top-Left [21:24]</span>
+            <span class="point-name">Next Top-Left [24:27]</span>
             <div class="xyz-box">
               <span class="axis">X:</span> <span class="num {getValClass($structuredObservation.next_gate.tl[0])}">{fmt($structuredObservation.next_gate.tl[0])}</span>
               <span class="axis">Y:</span> <span class="num {getValClass($structuredObservation.next_gate.tl[1])}">{fmt($structuredObservation.next_gate.tl[1])}</span>
@@ -231,7 +260,7 @@
 
           <!-- Next TR -->
           <div class="gate-point-row">
-            <span class="point-name">Next Top-Right [24:27]</span>
+            <span class="point-name">Next Top-Right [27:30]</span>
             <div class="xyz-box">
               <span class="axis">X:</span> <span class="num {getValClass($structuredObservation.next_gate.tr[0])}">{fmt($structuredObservation.next_gate.tr[0])}</span>
               <span class="axis">Y:</span> <span class="num {getValClass($structuredObservation.next_gate.tr[1])}">{fmt($structuredObservation.next_gate.tr[1])}</span>
@@ -241,7 +270,7 @@
 
           <!-- Next BL -->
           <div class="gate-point-row">
-            <span class="point-name">Next Bottom-Left [27:30]</span>
+            <span class="point-name">Next Bottom-Left [30:33]</span>
             <div class="xyz-box">
               <span class="axis">X:</span> <span class="num {getValClass($structuredObservation.next_gate.bl[0])}">{fmt($structuredObservation.next_gate.bl[0])}</span>
               <span class="axis">Y:</span> <span class="num {getValClass($structuredObservation.next_gate.bl[1])}">{fmt($structuredObservation.next_gate.bl[1])}</span>
@@ -251,7 +280,7 @@
 
           <!-- Next BR -->
           <div class="gate-point-row">
-            <span class="point-name">Next Bottom-Right [30:33]</span>
+            <span class="point-name">Next Bottom-Right [33:36]</span>
             <div class="xyz-box">
               <span class="axis">X:</span> <span class="num {getValClass($structuredObservation.next_gate.br[0])}">{fmt($structuredObservation.next_gate.br[0])}</span>
               <span class="axis">Y:</span> <span class="num {getValClass($structuredObservation.next_gate.br[1])}">{fmt($structuredObservation.next_gate.br[1])}</span>
@@ -261,12 +290,12 @@
         </div>
       </div>
 
-      <!-- 5. Previous Action -->
+      <!-- 6. Previous Action -->
       <div class="sub-card prev-act-card">
         <div class="sub-header font-hud">
           <span class="sub-dot blue"></span>
-          <span>5. LATCHED PREVIOUS ACTION (a_prev)</span>
-          <span class="dim-tag font-mono">4D [36:40]</span>
+          <span>6. LATCHED PREVIOUS ACTION (a_prev)</span>
+          <span class="dim-tag font-mono">3D [39:42]</span>
         </div>
         <div class="coords-row">
           <div class="coord-item">
@@ -279,12 +308,6 @@
             <span class="coord-lbl">v_left</span>
             <span class="val-pill {getValClass($structuredObservation.prev_action.vleft)}">
               {fmt($structuredObservation.prev_action.vleft)} <small>m/s</small>
-            </span>
-          </div>
-          <div class="coord-item">
-            <span class="coord-lbl">v_up</span>
-            <span class="val-pill {getValClass($structuredObservation.prev_action.vup)}">
-              {fmt($structuredObservation.prev_action.vup)} <small>m/s</small>
             </span>
           </div>
           <div class="coord-item">

@@ -27,7 +27,7 @@
           <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
         </svg>
       </span>
-      <span class="font-hud">POLICY ACTION SPACE (4D)</span>
+      <span class="font-hud">POLICY ACTION SPACE (3D)</span>
     </div>
     <span class="topic-tag font-mono">/policy/action</span>
   </div>
@@ -50,10 +50,17 @@
         <div class="gauge-track">
           <!-- 0.0 position is at (4 / 20) * 100 = 20% -->
           <div class="zero-marker" style="left: 20%;"></div>
-          <div
-            class="gauge-fill fill-cyan"
-            style="left: 20%; width: {Math.max(0, (($structuredAction?.vfwd || 0) / 16.0) * 80)}%;"
-          ></div>
+          {#if ($structuredAction?.vfwd || 0) >= 0}
+            <div
+              class="gauge-fill fill-cyan"
+              style="left: 20%; width: {Math.min(80, (($structuredAction?.vfwd || 0) / 16.0) * 80)}%;"
+            ></div>
+          {:else}
+            <div
+              class="gauge-fill fill-amber"
+              style="right: 80%; width: {Math.min(20, (Math.abs($structuredAction?.vfwd || 0) / 4.0) * 20)}%;"
+            ></div>
+          {/if}
         </div>
         <div class="gauge-labels font-mono">
           <span>-4.0 m/s</span>
@@ -99,43 +106,7 @@
       </div>
     </div>
 
-    <!-- 3. Vertical Velocity (v_up) -->
-    <div class="action-card">
-      <div class="act-header">
-        <div class="act-title font-hud">
-          <span class="act-dot green"></span>
-          <span>VERTICAL VELOCITY (v_up)</span>
-        </div>
-        <div class="act-value font-mono {Math.abs($structuredAction?.vup || 0) < 0.05 ? 'val-zero' : ($structuredAction?.vup || 0) > 0 ? 'val-pos' : 'val-neg'}">
-          {fmt($structuredAction?.vup, 2)} <small>m/s</small>
-        </div>
-      </div>
-
-      <!-- Bi-directional Bar -->
-      <div class="gauge-bar-wrapper">
-        <div class="gauge-track">
-          <div class="zero-marker" style="left: 50%;"></div>
-          {#if ($structuredAction?.vup || 0) >= 0}
-            <div
-              class="gauge-fill fill-green"
-              style="left: 50%; width: {Math.min(50, (($structuredAction?.vup || 0) / 6.0) * 50)}%;"
-            ></div>
-          {:else}
-            <div
-              class="gauge-fill fill-amber"
-              style="right: 50%; width: {Math.min(50, (Math.abs($structuredAction?.vup || 0) / 6.0) * 50)}%;"
-            ></div>
-          {/if}
-        </div>
-        <div class="gauge-labels font-mono">
-          <span>-6.0 (Sink)</span>
-          <span class="zero-lbl">0.0</span>
-          <span>+6.0 (Climb)</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- 4. Yaw Rate -->
+    <!-- 3. Yaw Rate -->
     <div class="action-card">
       <div class="act-header">
         <div class="act-title font-hud">
@@ -155,19 +126,19 @@
           {#if ($structuredAction?.yawRate || 0) >= 0}
             <div
               class="gauge-fill fill-amber"
-              style="left: 50%; width: {Math.min(50, (($structuredAction?.yawRate || 0) / 9.42) * 50)}%;"
+              style="left: 50%; width: {Math.min(50, (($structuredAction?.yawRate || 0) / 15.71) * 50)}%;"
             ></div>
           {:else}
             <div
               class="gauge-fill fill-amber"
-              style="right: 50%; width: {Math.min(50, (Math.abs($structuredAction?.yawRate || 0) / 9.42) * 50)}%;"
+              style="right: 50%; width: {Math.min(50, (Math.abs($structuredAction?.yawRate || 0) / 15.71) * 50)}%;"
             ></div>
           {/if}
         </div>
         <div class="gauge-labels font-mono">
-          <span>-540°/s (CW)</span>
+          <span>-900°/s (CW)</span>
           <span class="zero-lbl">0.0</span>
-          <span>+540°/s (CCW)</span>
+          <span>+900°/s (CCW)</span>
         </div>
       </div>
     </div>
