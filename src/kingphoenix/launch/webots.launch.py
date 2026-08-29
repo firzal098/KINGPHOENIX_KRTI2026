@@ -107,10 +107,11 @@ def generate_launch_description():
         name='mavros_gate_estimator',
         output='screen',
         parameters=[{
-            'pnp_vision_sigma':      2.0,
-            'drone_pose_sigma':      1.0,
-            'gate_prior_sigma':      3.0,
-            'association_max_dist':  10.0,
+            'pnp_vision_sigma':       2.0,
+            'drone_pose_sigma':       1.0,
+            'gate_prior_sigma':       3.0,
+            'association_max_dist':   10.0,
+            'max_refine_distance_m':  36.0,
         }],
     )
 

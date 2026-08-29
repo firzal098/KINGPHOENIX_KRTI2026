@@ -52,7 +52,7 @@ public:
         this->declare_parameter<double>("mahalanobis_thresh_sq", 11.345);
         this->declare_parameter<double>("max_prior_deviation_m", 1.5);
         this->declare_parameter<double>("max_refine_tilt_deg", 18.0);
-        this->declare_parameter<double>("max_refine_distance_m", 18.0);
+        this->declare_parameter<double>("max_refine_distance_m", 36.0);
         this->declare_parameter<bool>("publish_initial_pos", true);
 
         // Safe parameter reading (handles int or double from launch files without crashing)
@@ -63,7 +63,7 @@ public:
         mahalanobis_max_sq_   = get_param_as_double("mahalanobis_thresh_sq", 11.345);
         max_prior_deviation_  = get_param_as_double("max_prior_deviation_m", 1.5);
         max_tilt_rad_         = get_param_as_double("max_refine_tilt_deg", 18.0) * (M_PI / 180.0);
-        max_refine_dist_      = get_param_as_double("max_refine_distance_m", 18.0);
+        max_refine_dist_      = get_param_as_double("max_refine_distance_m", 36.0);
         publish_initial_pos_  = this->get_parameter("publish_initial_pos").as_bool();
 
         // Initialize zero offset defaults until first MAVROS pose is received
@@ -356,9 +356,15 @@ private:
             return;
         }
 
-        // 2. Target Gate Isolation: Only the active target gate is refined
+        // 2. Target Gate Isolation: Only active target gate is refined
         int target_idx = active_target_gate_idx_;
         if (target_idx < 0 || target_idx >= static_cast<int>(gates_.size())) {
+            return;
+        }
+
+        // Special Rule: Skip direct PnP refinement for Gate 3 (idx 2) and Gate 4 (idx 3);
+        // they are refined using the mean offset from Gate 1 and Gate 2.
+        if (target_idx == 2 || target_idx == 3) {
             return;
         }
 
@@ -390,13 +396,13 @@ private:
                              latest_pnp_covariances_.data[off + 3], latest_pnp_covariances_.data[off + 4], latest_pnp_covariances_.data[off + 5],
                              latest_pnp_covariances_.data[off + 6], latest_pnp_covariances_.data[off + 7], latest_pnp_covariances_.data[off + 8];
             } else {
-                // Distance-dependent Error Sigma Fallback
+                // Distance-dependent Error Sigma Fallback (smoothly scaling up to max_refine_dist_)
                 double eff_pnp_sigma = pnp_sigma_;
-                if (dist_to_cam > 20.0) {
-                    eff_pnp_sigma = 8.0;
+                if (dist_to_cam > 36.0) {
+                    eff_pnp_sigma = 10.0;
                 } else if (dist_to_cam > 5.0) {
-                    double ratio = (dist_to_cam - 5.0) / (20.0 - 5.0);
-                    eff_pnp_sigma = pnp_sigma_ + ratio * (8.0 - pnp_sigma_);
+                    double ratio = (dist_to_cam - 5.0) / (36.0 - 5.0);
+                    eff_pnp_sigma = pnp_sigma_ + ratio * (10.0 - pnp_sigma_);
                 } else {
                     eff_pnp_sigma = pnp_sigma_;
                 }
@@ -427,7 +433,36 @@ private:
 
         // Apply EKF update exclusively to the active target gate
         if (best_pnp_idx != -1) {
-            update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
+            if (target_idx == 4) {
+                // When targeting Gate 5, blend its raw PnP detection offset with the mean offset of Gate 1 & 2
+                Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
+                Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
+                Eigen::Vector3d offset_5_raw = best_z_meas - gates_[4].prior_pos_enu;
+
+                Eigen::Vector3d mean_offset_1_2_5 = (offset_1 + offset_2 + offset_5_raw) / 3.0;
+                Eigen::Vector3d z_meas_blended = gates_[4].prior_pos_enu + mean_offset_1_2_5;
+
+                update_gate_kalman(gates_[4], z_meas_blended, best_R_meas, min_mahalanobis_sq);
+            } else {
+                update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
+            }
+
+            // When Gate 1 or Gate 2 is refined, propagate their mean correction offset to Gate 3, 4, and 5
+            if (target_idx == 0 || target_idx == 1) {
+                Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
+                Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
+                Eigen::Vector3d mean_offset = (target_idx == 0) ? offset_1 : (0.5 * (offset_1 + offset_2));
+
+                if (gates_.size() > 2) {
+                    gates_[2].position_enu = gates_[2].prior_pos_enu + mean_offset;
+                }
+                if (gates_.size() > 3) {
+                    gates_[3].position_enu = gates_[3].prior_pos_enu + mean_offset;
+                }
+                if (gates_.size() > 4) {
+                    gates_[4].position_enu = gates_[4].prior_pos_enu + mean_offset;
+                }
+            }
         }
     }
 

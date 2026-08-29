@@ -358,24 +358,51 @@ public:
 
         // 5. Next Gate Preview 15D Features in Body FLU [24:39]
         // Previews next sub-gate ahead (sub-gate k+1) until the last sub-gate, which previews next main gate.
+        // For Gate 5 (terminal gate), projects a virtual gate 3.0m in front of Gate 5 along its normal vector.
         size_t preview_main_idx = current_gate_target_index_;
         size_t preview_sub_idx = 0;
         bool has_next = false;
+        geometry_msgs::msg::Pose next_gate_pose;
 
         size_t total_subgates = getSubgateCount(current_gate_target_index_);
         if (current_sub_gate_index_ + 1 < total_subgates) {
             preview_main_idx = current_gate_target_index_;
             preview_sub_idx = current_sub_gate_index_ + 1;
             has_next = (!current_gate_poses_.poses.empty() && preview_main_idx < current_gate_poses_.poses.size());
-        } else {
+            if (has_next) {
+                next_gate_pose = getGatePose(preview_main_idx, preview_sub_idx, px, py, pz);
+            }
+        } else if (current_gate_target_index_ + 1 < current_gate_poses_.poses.size()) {
             preview_main_idx = current_gate_target_index_ + 1;
             preview_sub_idx = 0;
-            has_next = (!current_gate_poses_.poses.empty() && preview_main_idx < current_gate_poses_.poses.size());
+            has_next = true;
+            next_gate_pose = getGatePose(preview_main_idx, preview_sub_idx, px, py, pz);
+        } else if (current_gate_target_index_ == 4 && !current_gate_poses_.poses.empty()) {
+            // Virtual Preview Gate 3.0m in front of Gate 5 along normal
+            has_next = true;
+            geometry_msgs::msg::Pose gate5_pose = getGatePose(4, 0, px, py, pz);
+            next_gate_pose = gate5_pose;
+
+            double qw = gate5_pose.orientation.w;
+            double qx = gate5_pose.orientation.x;
+            double qy = gate5_pose.orientation.y;
+            double qz = gate5_pose.orientation.z;
+            double g_norm = std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+            if (g_norm > 1e-6) {
+                qw /= g_norm; qx /= g_norm; qy /= g_norm; qz /= g_norm;
+            } else {
+                qw = 1.0; qx = 0.0; qy = 0.0; qz = 0.0;
+            }
+            double nx = 1.0 - 2.0 * (qy * qy + qz * qz);
+            double ny = 2.0 * (qx * qy + qw * qz);
+            double nz = 2.0 * (qx * qz - qw * qy);
+
+            next_gate_pose.position.x += 3.0 * nx;
+            next_gate_pose.position.y += 3.0 * ny;
+            next_gate_pose.position.z += 3.0 * nz;
         }
 
         if (has_next) {
-            geometry_msgs::msg::Pose next_gate_pose = getGatePose(preview_main_idx, preview_sub_idx, px, py, pz);
-
             double ngw = next_gate_pose.orientation.w;
             double ngx = next_gate_pose.orientation.x;
             double ngy = next_gate_pose.orientation.y;

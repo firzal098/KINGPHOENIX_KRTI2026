@@ -221,7 +221,10 @@
     group.add(ring);
 
     // Sprite Label above gate
-    const labelText = isSubgate ? `GATE #${id}.${subIndex} (SUB)` : `GATE #${id}`;
+    let labelText = isSubgate ? `GATE #${id}.${subIndex} (SUB)` : `GATE #${id}`;
+    if (id === 5 && isSubgate) {
+      labelText = 'VIRTUAL EXIT (+3m)';
+    }
     const labelColor = isSubgate ? '#38bdf8' : '#00f0ff';
     const label = createTextSprite(labelText, labelColor);
     label.name = 'gate_label';
@@ -339,10 +342,14 @@
     scene.add(g4_sub2.group);
     gateGroups.push(g4_sub2);
 
-    // Gate 5: Main (sub 0)
+    // Gate 5: Main (sub 0) + Virtual Exit Ghost Gate (sub 1, offset 3.0m)
     const g5 = buildGateMesh(5, 0, false, 0.0);
     scene.add(g5.group);
     gateGroups.push(g5);
+
+    const g5_exit = buildGateMesh(5, 1, true, 3.0);
+    scene.add(g5_exit.group);
+    gateGroups.push(g5_exit);
 
     // 9. Permanent Flight Trajectory Ribbon (Cyan Line)
     const trailGeo = new THREE.BufferGeometry();
@@ -503,7 +510,7 @@
       gate.group.rotation.set(0, base.yaw, 0);
 
       // Highlighting logic matching Policy sequential preview:
-      const totalSubgates = (currentTarget === 2 ? 2 : (currentTarget === 3 ? 3 : 1));
+      const totalSubgates = (currentTarget === 2 ? 2 : (currentTarget === 3 ? 3 : (currentTarget === 4 ? 2 : 1)));
       let previewMainIdx = currentTarget;
       let previewSubIdx = 0;
       if (currentSubTarget + 1 < totalSubgates) {

@@ -44,7 +44,10 @@ export const previewGateLabel = derived([targetGateIndex, targetSubGateIndex], (
   if ($idx < 4) {
     return `GATE #${$idx + 2}`;
   }
-  return 'NONE (FINAL GATE)';
+  if ($idx === 4) {
+    return 'VIRTUAL EXIT (+3.0m)';
+  }
+  return 'ALL CLEARED';
 });
 
 export const fcuState = writable({
