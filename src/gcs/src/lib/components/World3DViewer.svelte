@@ -502,35 +502,34 @@
       gate.group.position.set(posX, posY, posZ);
       gate.group.rotation.set(0, base.yaw, 0);
 
-      // Highlighting logic:
-      const isCurrentMain = (mainIdx === currentTarget);
-      const isNextMain = (mainIdx === currentTarget + 1);
-      const isPassedMain = (mainIdx < currentTarget);
+      // Highlighting logic matching Policy sequential preview:
+      const totalSubgates = (currentTarget === 2 ? 2 : (currentTarget === 3 ? 3 : 1));
+      let previewMainIdx = currentTarget;
+      let previewSubIdx = 0;
+      if (currentSubTarget + 1 < totalSubgates) {
+        previewMainIdx = currentTarget;
+        previewSubIdx = currentSubTarget + 1;
+      } else {
+        previewMainIdx = currentTarget + 1;
+        previewSubIdx = 0;
+      }
 
-      if (isCurrentMain) {
-        if (gate.subIndex === currentSubTarget) {
-          // Active Target Gate/Sub-gate -> Vibrant Emerald Green with Pulse Ring
-          gate.frameMat.color.setHex(0x10b981);
-          gate.frameMat.emissive.setHex(0x064e3b);
-          gate.ring.visible = true;
-        } else if (gate.subIndex < currentSubTarget) {
-          // Passed sub-gate -> Dim Silver
-          gate.frameMat.color.setHex(0x475569);
-          gate.frameMat.emissive.setHex(0x0f172a);
-          gate.ring.visible = false;
-        } else {
-          // Upcoming sub-gate -> Cyber Cyan
-          gate.frameMat.color.setHex(0x38bdf8);
-          gate.frameMat.emissive.setHex(0x0284c7);
-          gate.ring.visible = false;
-        }
-      } else if (isNextMain && gate.subIndex === 0) {
-        // Next Preview Main Gate -> Amber Gold
+      const isCurrentActive = (mainIdx === currentTarget && gate.subIndex === currentSubTarget);
+      const isPreviewGate = (mainIdx === previewMainIdx && gate.subIndex === previewSubIdx);
+      const isPassed = (mainIdx < currentTarget) || (mainIdx === currentTarget && gate.subIndex < currentSubTarget);
+
+      if (isCurrentActive) {
+        // Active Target Gate/Sub-gate -> Vibrant Emerald Green with Pulse Ring
+        gate.frameMat.color.setHex(0x10b981);
+        gate.frameMat.emissive.setHex(0x064e3b);
+        gate.ring.visible = true;
+      } else if (isPreviewGate) {
+        // Next Preview Gate/Sub-gate -> Amber Gold
         gate.frameMat.color.setHex(0xf59e0b);
         gate.frameMat.emissive.setHex(0x78350f);
         gate.ring.visible = false;
-      } else if (isPassedMain) {
-        // Passed Gate -> Dim Silver/Slate
+      } else if (isPassed) {
+        // Passed Gate/Sub-gate -> Dim Silver/Slate
         gate.frameMat.color.setHex(0x475569);
         gate.frameMat.emissive.setHex(0x0f172a);
         gate.ring.visible = false;

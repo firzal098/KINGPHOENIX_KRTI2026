@@ -4,6 +4,7 @@
     rawObservation,
     targetGateLabel,
     targetGateIndex,
+    previewGateLabel,
     setTargetGate
   } from '../ros.js';
 
@@ -227,7 +228,7 @@
         <div class="sub-header font-hud">
           <div class="gate-header-left">
             <span class="sub-dot amber"></span>
-            <span>5. NEXT PREVIEW: {$targetGateIndex < 4 ? `GATE #${$targetGateIndex + 2}` : 'NONE (FINAL GATE)'}</span>
+            <span>5. NEXT PREVIEW: {$previewGateLabel}</span>
             <span class="dim-tag font-mono">15D [24:39]</span>
           </div>
           {#if $structuredObservation.next_gate.has_next}

@@ -362,11 +362,6 @@ private:
             return;
         }
 
-        // Special Rule: When Gate 4 (index 3) is targeted, do not refine it directly (it shares Gate 3's offset)
-        if (target_idx == 3) {
-            return;
-        }
-
         const Eigen::Matrix3d R_drone = latest_drone_rot_.toRotationMatrix();
         const Eigen::Matrix3d R_total = R_drone * R_cam_to_body_;
         const Eigen::Matrix3d R_drone_pos = Eigen::Matrix3d::Identity() * (drone_sigma_ * drone_sigma_);
@@ -433,13 +428,6 @@ private:
         // Apply EKF update exclusively to the active target gate
         if (best_pnp_idx != -1) {
             update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
-
-            // Special Rule: When targeting Gate 3 (index 2), immediately apply its refined offset to Gate 4 (index 3)
-            if (target_idx == 2 && gates_.size() > 3) {
-                Eigen::Vector3d offset_3 = gates_[2].position_enu - gates_[2].prior_pos_enu;
-                gates_[3].position_enu = gates_[3].prior_pos_enu + offset_3;
-                gates_[3].covariance = gates_[2].covariance;
-            }
         }
     }
 

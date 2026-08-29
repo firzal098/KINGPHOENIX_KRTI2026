@@ -36,6 +36,17 @@ export const targetGateLabel = derived([targetGateIndex, targetSubGateIndex], ([
   return `GATE #${$idx + 1} (${$idx + 1}/5)`;
 });
 
+export const previewGateLabel = derived([targetGateIndex, targetSubGateIndex], ([$idx, $sub]) => {
+  const totalSub = ($idx === 2 ? 2 : ($idx === 3 ? 3 : 1));
+  if ($sub + 1 < totalSub) {
+    return `GATE #${$idx + 1}.${$sub + 1} (SUB ${$sub + 1})`;
+  }
+  if ($idx < 4) {
+    return `GATE #${$idx + 2}`;
+  }
+  return 'NONE (FINAL GATE)';
+});
+
 export const fcuState = writable({
   connected: false,
   armed: false,

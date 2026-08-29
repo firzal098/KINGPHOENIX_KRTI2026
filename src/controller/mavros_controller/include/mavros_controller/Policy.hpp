@@ -356,12 +356,25 @@ public:
         observation_vector_[22] = p_gate_flu[1];
         observation_vector_[23] = p_gate_flu[2];
 
-        // 5. Next Gate Preview 15D Features in Body FLU [24:39] (Always previews next MAIN gate: current_gate_target_index_ + 1)
-        size_t next_main_gate_idx = current_gate_target_index_ + 1;
-        bool has_next = (!current_gate_poses_.poses.empty() && next_main_gate_idx < current_gate_poses_.poses.size());
+        // 5. Next Gate Preview 15D Features in Body FLU [24:39]
+        // Previews next sub-gate ahead (sub-gate k+1) until the last sub-gate, which previews next main gate.
+        size_t preview_main_idx = current_gate_target_index_;
+        size_t preview_sub_idx = 0;
+        bool has_next = false;
+
+        size_t total_subgates = getSubgateCount(current_gate_target_index_);
+        if (current_sub_gate_index_ + 1 < total_subgates) {
+            preview_main_idx = current_gate_target_index_;
+            preview_sub_idx = current_sub_gate_index_ + 1;
+            has_next = (!current_gate_poses_.poses.empty() && preview_main_idx < current_gate_poses_.poses.size());
+        } else {
+            preview_main_idx = current_gate_target_index_ + 1;
+            preview_sub_idx = 0;
+            has_next = (!current_gate_poses_.poses.empty() && preview_main_idx < current_gate_poses_.poses.size());
+        }
 
         if (has_next) {
-            geometry_msgs::msg::Pose next_gate_pose = getGatePose(next_main_gate_idx, 0, px, py, pz);
+            geometry_msgs::msg::Pose next_gate_pose = getGatePose(preview_main_idx, preview_sub_idx, px, py, pz);
 
             double ngw = next_gate_pose.orientation.w;
             double ngx = next_gate_pose.orientation.x;
