@@ -85,6 +85,12 @@ public:
         target_subgate_pub_ = this->create_publisher<std_msgs::msg::Int32>(
             "/controller/target_subgate_index", 10);
 
+        preview_gate_pub_ = this->create_publisher<std_msgs::msg::Int32>(
+            "/controller/preview_gate_index", 10);
+
+        preview_subgate_pub_ = this->create_publisher<std_msgs::msg::Int32>(
+            "/controller/preview_subgate_index", 10);
+
         // Subscriber to manually set Active Target Gate Index from GCS
         set_target_gate_sub_ = this->create_subscription<std_msgs::msg::Int32>(
             "/controller/set_target_gate", qos_reliable,
@@ -120,7 +126,16 @@ public:
         // Declare model_path parameter (defaults to installed share directory path)
         this->declare_parameter<std::string>("model_path", default_model_path);
         std::string model_path = this->get_parameter("model_path").as_string();
+
+        this->declare_parameter<int>("triple_gate_pass_method", 1);
+        int triple_gate_pass_method = this->get_parameter("triple_gate_pass_method").as_int();
+
+        this->declare_parameter<double>("max_accel", 5.6638);
+        double max_accel = this->get_parameter("max_accel").as_double();
+
         policy_.init(this, model_path);
+        policy_.setTripleGatePassMethod(triple_gate_pass_method);
+        policy_.setMaxAccel(max_accel);
 
         this->declare_parameter<double>("target_altitude", 1.0);
         target_altitude_ = this->get_parameter("target_altitude").as_double();
@@ -168,6 +183,18 @@ public:
             std_msgs::msg::Int32 subgate_msg;
             subgate_msg.data = static_cast<int32_t>(policy_.getTargetSubGateIndex());
             target_subgate_pub_->publish(subgate_msg);
+        }
+
+        if (preview_gate_pub_) {
+            std_msgs::msg::Int32 prev_gate_msg;
+            prev_gate_msg.data = static_cast<int32_t>(policy_.getPreviewGateIndex());
+            preview_gate_pub_->publish(prev_gate_msg);
+        }
+
+        if (preview_subgate_pub_) {
+            std_msgs::msg::Int32 prev_sub_msg;
+            prev_sub_msg.data = static_cast<int32_t>(policy_.getPreviewSubGateIndex());
+            preview_subgate_pub_->publish(prev_sub_msg);
         }
     }
 
@@ -782,6 +809,8 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr current_state_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr target_gate_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr target_subgate_pub_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr preview_gate_pub_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr preview_subgate_pub_;
 
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
     rclcpp::Client<mavros_msgs::srv::CommandLong>::SharedPtr command_client_;

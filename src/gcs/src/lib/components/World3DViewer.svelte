@@ -9,6 +9,8 @@
     targetGateIndex,
     targetSubGateIndex,
     targetGateLabel,
+    previewGateIndex,
+    previewSubGateIndex,
     setTargetGate,
     callResetGates,
     addToast
@@ -222,7 +224,9 @@
 
     // Sprite Label above gate
     let labelText = isSubgate ? `GATE #${id}.${subIndex} (SUB)` : `GATE #${id}`;
-    if (id === 5 && isSubgate) {
+    if (id === 4 && subIndex === 3) {
+      labelText = 'VIRTUAL GATE 4 (+3m)';
+    } else if (id === 5 && isSubgate) {
       labelText = 'VIRTUAL EXIT (+3m)';
     }
     const labelColor = isSubgate ? '#38bdf8' : '#00f0ff';
@@ -341,6 +345,10 @@
     const g4_sub2 = buildGateMesh(4, 2, true, 2.0);
     scene.add(g4_sub2.group);
     gateGroups.push(g4_sub2);
+
+    const g4_virtual = buildGateMesh(4, 3, true, 3.0);
+    scene.add(g4_virtual.group);
+    gateGroups.push(g4_virtual);
 
     // Gate 5: Main (sub 0) + Virtual Exit Ghost Gate (sub 1, offset 3.0m)
     const g5 = buildGateMesh(5, 0, false, 0.0);
@@ -509,20 +517,14 @@
       gate.group.position.set(posX, posY, posZ);
       gate.group.rotation.set(0, base.yaw, 0);
 
-      // Highlighting logic matching Policy sequential preview:
-      const totalSubgates = (currentTarget === 2 ? 2 : (currentTarget === 3 ? 3 : (currentTarget === 4 ? 2 : 1)));
-      let previewMainIdx = currentTarget;
-      let previewSubIdx = 0;
-      if (currentSubTarget + 1 < totalSubgates) {
-        previewMainIdx = currentTarget;
-        previewSubIdx = currentSubTarget + 1;
-      } else {
-        previewMainIdx = currentTarget + 1;
-        previewSubIdx = 0;
-      }
+      // Highlighting logic matching live controller preview topics:
+      let currentPreviewMain = 1;
+      let currentPreviewSub = 0;
+      previewGateIndex.subscribe((v) => (currentPreviewMain = v))();
+      previewSubGateIndex.subscribe((v) => (currentPreviewSub = v))();
 
       const isCurrentActive = (mainIdx === currentTarget && gate.subIndex === currentSubTarget);
-      const isPreviewGate = (mainIdx === previewMainIdx && gate.subIndex === previewSubIdx);
+      const isPreviewGate = (mainIdx === currentPreviewMain && gate.subIndex === currentPreviewSub);
       const isPassed = (mainIdx < currentTarget) || (mainIdx === currentTarget && gate.subIndex < currentSubTarget);
 
       if (isCurrentActive) {

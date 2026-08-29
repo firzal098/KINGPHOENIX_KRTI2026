@@ -107,11 +107,13 @@ def generate_launch_description():
         name='mavros_gate_estimator',
         output='screen',
         parameters=[{
-            'pnp_vision_sigma':       2.0,
-            'drone_pose_sigma':       1.0,
-            'gate_prior_sigma':       3.0,
-            'association_max_dist':   10.0,
-            'max_refine_distance_m':  36.0,
+            'pnp_vision_sigma':           2.0,
+            'drone_pose_sigma':           1.0,
+            'gate_prior_sigma':           3.0,
+            'association_max_dist':       10.0,
+            'max_refine_distance_m':      36.0,
+            'blend_gate5_with_mean_1_2':  False,
+            'tunnel_blend_gate1_and_2':   False,
         }],
     )
 
@@ -120,6 +122,11 @@ def generate_launch_description():
         executable='controller',
         name='controller',
         output='screen',
+        parameters=[{
+            'triple_gate_pass_method': 3,
+            #'max_accel': 5.6638,
+            'max_accel': 6.5,
+        }],
     )
 
     cuda_gate_inference_node = Node(

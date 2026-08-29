@@ -36,16 +36,21 @@ export const targetGateLabel = derived([targetGateIndex, targetSubGateIndex], ([
   return `GATE #${$idx + 1} (${$idx + 1}/5)`;
 });
 
-export const previewGateLabel = derived([targetGateIndex, targetSubGateIndex], ([$idx, $sub]) => {
-  const totalSub = ($idx === 2 ? 2 : ($idx === 3 ? 3 : 1));
-  if ($sub + 1 < totalSub) {
-    return `GATE #${$idx + 1}.${$sub + 1} (SUB ${$sub + 1})`;
+export const previewGateIndex = writable(1);
+export const previewSubGateIndex = writable(0);
+
+export const previewGateLabel = derived([previewGateIndex, previewSubGateIndex], ([$pIdx, $pSub]) => {
+  if ($pIdx === 3 && $pSub === 3) {
+    return 'VIRTUAL GATE 4 (+3.0m)';
   }
-  if ($idx < 4) {
-    return `GATE #${$idx + 2}`;
-  }
-  if ($idx === 4) {
+  if ($pIdx === 4 && $pSub === 1) {
     return 'VIRTUAL EXIT (+3.0m)';
+  }
+  if ($pSub > 0) {
+    return `GATE #${$pIdx + 1}.${$pSub} (SUB ${$pSub})`;
+  }
+  if ($pIdx >= 0 && $pIdx < 5) {
+    return `GATE #${$pIdx + 1}`;
   }
   return 'ALL CLEARED';
 });
@@ -363,6 +368,28 @@ function subscribeTopics() {
       let currMain = 0;
       targetGateIndex.subscribe((v) => (currMain = v))();
       handleGateAdvance(currMain, msg.data);
+    }
+  });
+
+  const previewGateSub = new ROSLIB.Topic({
+    ros,
+    name: '/controller/preview_gate_index',
+    messageType: 'std_msgs/msg/Int32',
+  });
+  previewGateSub.subscribe((msg) => {
+    if (msg && typeof msg.data === 'number') {
+      previewGateIndex.set(msg.data);
+    }
+  });
+
+  const previewSubgateSub = new ROSLIB.Topic({
+    ros,
+    name: '/controller/preview_subgate_index',
+    messageType: 'std_msgs/msg/Int32',
+  });
+  previewSubgateSub.subscribe((msg) => {
+    if (msg && typeof msg.data === 'number') {
+      previewSubGateIndex.set(msg.data);
     }
   });
 

@@ -29,6 +29,8 @@ public:
       prev_dot_product_(1.0),
       has_prev_drone_pos_(false),
       has_imu_(false),
+      triple_gate_pass_method_(1),
+      a_max_(5.6638),
       onnx_loaded_(false)
     {
         observation_vector_.fill(0.0);
@@ -44,6 +46,14 @@ public:
     void init(rclcpp::Node* node, const std::string& model_path = "models/policy.onnx")
     {
         node_ = node;
+
+        if (node_->has_parameter("triple_gate_pass_method")) {
+            triple_gate_pass_method_ = node_->get_parameter("triple_gate_pass_method").as_int();
+        }
+        if (node_->has_parameter("max_accel")) {
+            a_max_ = node_->get_parameter("max_accel").as_double();
+        }
+
         auto qos_reliable = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
         auto qos_best_effort = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
 
@@ -365,7 +375,52 @@ public:
         geometry_msgs::msg::Pose next_gate_pose;
 
         size_t total_subgates = getSubgateCount(current_gate_target_index_);
-        if (current_sub_gate_index_ + 1 < total_subgates) {
+        if (current_gate_target_index_ == 3 && triple_gate_pass_method_ == 2) {
+            // Method 2: Force preview gate to target next main gate (Gate 5) during Gate 4 active target
+            preview_main_idx = current_gate_target_index_ + 1;
+            preview_sub_idx = 0;
+            has_next = (!current_gate_poses_.poses.empty() && preview_main_idx < current_gate_poses_.poses.size());
+            if (has_next) {
+                next_gate_pose = getGatePose(preview_main_idx, preview_sub_idx, px, py, pz);
+            }
+        } else if (current_gate_target_index_ == 3 && triple_gate_pass_method_ == 3) {
+            // Method 3: Preview a virtual gate 3.0m in front of Gate 4 main entrance until reaching the last sub-gate, then preview Gate 5
+            if (current_sub_gate_index_ < total_subgates - 1) {
+                preview_main_idx = 3;
+                preview_sub_idx = 3; // Virtual Gate 4 (+3.0m from entrance)
+                has_next = (!current_gate_poses_.poses.empty() && 3 < current_gate_poses_.poses.size());
+                if (has_next) {
+                    geometry_msgs::msg::Pose gate4_pose = getGatePose(3, 0, px, py, pz);
+                    next_gate_pose = gate4_pose;
+
+                    double qw = gate4_pose.orientation.w;
+                    double qx = gate4_pose.orientation.x;
+                    double qy = gate4_pose.orientation.y;
+                    double qz = gate4_pose.orientation.z;
+                    double g_norm = std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+                    if (g_norm > 1e-6) {
+                        qw /= g_norm; qx /= g_norm; qy /= g_norm; qz /= g_norm;
+                    } else {
+                        qw = 1.0; qx = 0.0; qy = 0.0; qz = 0.0;
+                    }
+                    double nx = 1.0 - 2.0 * (qy * qy + qz * qz);
+                    double ny = 2.0 * (qx * qy + qw * qz);
+                    double nz = 2.0 * (qx * qz - qw * qy);
+
+                    next_gate_pose.position.x += 3.0 * nx;
+                    next_gate_pose.position.y += 3.0 * ny;
+                    next_gate_pose.position.z += 3.0 * nz;
+                }
+            } else {
+                preview_main_idx = 4; // Gate 5
+                preview_sub_idx = 0;
+                has_next = (!current_gate_poses_.poses.empty() && preview_main_idx < current_gate_poses_.poses.size());
+                if (has_next) {
+                    next_gate_pose = getGatePose(preview_main_idx, preview_sub_idx, px, py, pz);
+                }
+            }
+        } else if (current_sub_gate_index_ + 1 < total_subgates) {
+            // Method 1: Preview immediate next sub-gate in the tunnel
             preview_main_idx = current_gate_target_index_;
             preview_sub_idx = current_sub_gate_index_ + 1;
             has_next = (!current_gate_poses_.poses.empty() && preview_main_idx < current_gate_poses_.poses.size());
@@ -379,6 +434,8 @@ public:
             next_gate_pose = getGatePose(preview_main_idx, preview_sub_idx, px, py, pz);
         } else if (current_gate_target_index_ == 4 && !current_gate_poses_.poses.empty()) {
             // Virtual Preview Gate 3.0m in front of Gate 5 along normal
+            preview_main_idx = 4;
+            preview_sub_idx = 1;
             has_next = true;
             geometry_msgs::msg::Pose gate5_pose = getGatePose(4, 0, px, py, pz);
             next_gate_pose = gate5_pose;
@@ -401,6 +458,9 @@ public:
             next_gate_pose.position.y += 3.0 * ny;
             next_gate_pose.position.z += 3.0 * nz;
         }
+
+        current_preview_gate_index_ = has_next ? preview_main_idx : 999;
+        current_preview_sub_gate_index_ = has_next ? preview_sub_idx : 0;
 
         if (has_next) {
             double ngw = next_gate_pose.orientation.w;
@@ -730,11 +790,10 @@ public:
             has_filtered_vel_ = true;
         }
 
-        // 7. Acceleration Slew-Rate Limiter (a_max = 5.6638 m/s^2 from crazyflow_gate_env.py)
+        // 7. Acceleration Slew-Rate Limiter (a_max parameter)
         // Prevents excessive pitch tilt that causes vertical lift loss
         const double dt = 0.02; // 50 Hz control period
-        const double a_max = 5.6638; // Maximum acceleration [m/s^2]
-        const double max_dv = a_max * dt; // 0.1133 m/s max velocity change per step
+        const double max_dv = a_max_ * dt;
 
         double dvx = vx_world - filtered_vx_;
         double dvy = vy_world - filtered_vy_;
@@ -779,12 +838,18 @@ public:
     // Getters and Setters
     size_t getTargetGateIndex() const { return current_gate_target_index_; }
     size_t getTargetSubGateIndex() const { return current_sub_gate_index_; }
+    size_t getPreviewGateIndex() const { return current_preview_gate_index_; }
+    size_t getPreviewSubGateIndex() const { return current_preview_sub_gate_index_; }
     void setTargetGateIndex(size_t index, size_t sub_index = 0) {
         current_gate_target_index_ = index;
         current_sub_gate_index_ = sub_index;
         has_prev_drone_pos_ = false;
         prev_dot_product_ = 1.0;
     }
+    void setTripleGatePassMethod(int method) { triple_gate_pass_method_ = method; }
+    int getTripleGatePassMethod() const { return triple_gate_pass_method_; }
+    void setMaxAccel(double a_max) { a_max_ = a_max; }
+    double getMaxAccel() const { return a_max_; }
     const std::array<double, 42>& getObservationVector() const { return observation_vector_; }
 
 private:
@@ -812,9 +877,13 @@ private:
     rclcpp::Node* node_{nullptr};
     size_t current_gate_target_index_{0};
     size_t current_sub_gate_index_{0};
+    size_t current_preview_gate_index_{1};
+    size_t current_preview_sub_gate_index_{0};
     double prev_dot_product_{1.0};
     bool has_prev_drone_pos_{false};
     std::array<double, 3> prev_drone_pos_{};
+    int triple_gate_pass_method_{1};
+    double a_max_{5.6638};
 
     double filtered_vx_{0.0};
     double filtered_vy_{0.0};

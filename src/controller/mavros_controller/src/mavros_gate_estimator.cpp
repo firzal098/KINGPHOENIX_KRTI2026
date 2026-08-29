@@ -54,17 +54,21 @@ public:
         this->declare_parameter<double>("max_refine_tilt_deg", 18.0);
         this->declare_parameter<double>("max_refine_distance_m", 36.0);
         this->declare_parameter<bool>("publish_initial_pos", true);
+        this->declare_parameter<bool>("blend_gate5_with_mean_1_2", true);
+        this->declare_parameter<bool>("tunnel_blend_gate1_and_2", true);
 
         // Safe parameter reading (handles int or double from launch files without crashing)
-        prior_sigma_          = get_param_as_double("gate_prior_sigma", 1.5);
-        drone_sigma_          = get_param_as_double("drone_pose_sigma", 2.0);
-        pnp_sigma_            = get_param_as_double("pnp_vision_sigma", 4.0);
-        max_dist_             = get_param_as_double("association_max_dist", 6.0);
-        mahalanobis_max_sq_   = get_param_as_double("mahalanobis_thresh_sq", 11.345);
-        max_prior_deviation_  = get_param_as_double("max_prior_deviation_m", 1.5);
-        max_tilt_rad_         = get_param_as_double("max_refine_tilt_deg", 18.0) * (M_PI / 180.0);
-        max_refine_dist_      = get_param_as_double("max_refine_distance_m", 36.0);
-        publish_initial_pos_  = this->get_parameter("publish_initial_pos").as_bool();
+        prior_sigma_                = get_param_as_double("gate_prior_sigma", 1.5);
+        drone_sigma_                = get_param_as_double("drone_pose_sigma", 2.0);
+        pnp_sigma_                  = get_param_as_double("pnp_vision_sigma", 4.0);
+        max_dist_                   = get_param_as_double("association_max_dist", 6.0);
+        mahalanobis_max_sq_         = get_param_as_double("mahalanobis_thresh_sq", 11.345);
+        max_prior_deviation_        = get_param_as_double("max_prior_deviation_m", 1.5);
+        max_tilt_rad_               = get_param_as_double("max_refine_tilt_deg", 18.0) * (M_PI / 180.0);
+        max_refine_dist_            = get_param_as_double("max_refine_distance_m", 36.0);
+        publish_initial_pos_        = this->get_parameter("publish_initial_pos").as_bool();
+        blend_gate5_with_mean_1_2_  = this->get_parameter("blend_gate5_with_mean_1_2").as_bool();
+        tunnel_blend_gate1_and_2_   = this->get_parameter("tunnel_blend_gate1_and_2").as_bool();
 
         // Initialize zero offset defaults until first MAVROS pose is received
         initial_drone_pos_ = Eigen::Vector3d::Zero();
@@ -433,37 +437,49 @@ private:
 
         // Apply EKF update exclusively to the active target gate
         if (best_pnp_idx != -1) {
-            if (target_idx == 4) {
-                // When targeting Gate 5, blend its raw PnP detection offset with the mean offset of Gate 1 & 2
-                Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
+            if (target_idx == 4 && blend_gate5_with_mean_1_2_) {
+                // When targeting Gate 5 and blend is enabled, blend raw PnP offset (60%) with Gate 2 offset (40%)
                 Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
                 Eigen::Vector3d offset_5_raw = best_z_meas - gates_[4].prior_pos_enu;
 
-                // Equal 3-way mean: (Gate 1 + Gate 2 + Gate 5) / 3
-                Eigen::Vector3d mean_offset_1_2_5 = (offset_1 + offset_2 + offset_5_raw) / 3.0;
-                Eigen::Vector3d z_meas_blended = gates_[4].prior_pos_enu + mean_offset_1_2_5;
+                Eigen::Vector3d blended_offset = 0.40 * offset_2 + 0.60 * offset_5_raw;
+                Eigen::Vector3d z_meas_blended = gates_[4].prior_pos_enu + blended_offset;
 
                 update_gate_kalman(gates_[4], z_meas_blended, best_R_meas, min_mahalanobis_sq);
             } else {
                 update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
             }
 
-            // When Gate 1 or Gate 2 is refined, propagate their equal mean correction offset to Gate 3, 4, and 5
+            // When Gate 1 or Gate 2 is refined, propagate correction offset to Gate 3, 4, and (optionally) Gate 5
             if (target_idx == 0 || target_idx == 1) {
                 Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
                 Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
                 
-                // Equal mean offset
-                Eigen::Vector3d mean_offset = (target_idx == 0) ? offset_1 : (0.5 * (offset_1 + offset_2));
+                Eigen::Vector3d mean_offset = Eigen::Vector3d::Zero();
+                bool should_propagate = false;
 
-                if (gates_.size() > 2) {
-                    gates_[2].position_enu = gates_[2].prior_pos_enu + mean_offset;
+                if (tunnel_blend_gate1_and_2_) {
+                    // Blend Gate 1 & 2
+                    mean_offset = (target_idx == 0) ? offset_1 : (0.5 * (offset_1 + offset_2));
+                    should_propagate = true;
+                } else {
+                    // Gate 2 only (ignore Gate 1 updates for tunnels)
+                    if (target_idx == 1) {
+                        mean_offset = offset_2;
+                        should_propagate = true;
+                    }
                 }
-                if (gates_.size() > 3) {
-                    gates_[3].position_enu = gates_[3].prior_pos_enu + mean_offset;
-                }
-                if (gates_.size() > 4) {
-                    gates_[4].position_enu = gates_[4].prior_pos_enu + mean_offset;
+
+                if (should_propagate) {
+                    if (gates_.size() > 2) {
+                        gates_[2].position_enu = gates_[2].prior_pos_enu + mean_offset;
+                    }
+                    if (gates_.size() > 3) {
+                        gates_[3].position_enu = gates_[3].prior_pos_enu + mean_offset;
+                    }
+                    if (gates_.size() > 4 && blend_gate5_with_mean_1_2_) {
+                        gates_[4].position_enu = gates_[4].prior_pos_enu + 0.40 * offset_2;
+                    }
                 }
             }
         }
@@ -618,6 +634,8 @@ private:
     double max_tilt_rad_;
     double max_refine_dist_;
     bool publish_initial_pos_;
+    bool blend_gate5_with_mean_1_2_{true};
+    bool tunnel_blend_gate1_and_2_{true};
 
     // Data structures & matrices
     std::vector<GateState> gates_;
