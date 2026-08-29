@@ -19,6 +19,7 @@ from ament_index_python.packages import get_package_share_directory
 
 from sensor_msgs.msg import Image, CompressedImage, CameraInfo
 from geometry_msgs.msg import PoseArray, PoseStamped, Pose, Point, Quaternion
+from std_msgs.msg import Float64MultiArray
 
 try:
     from vision_msgs.msg import Detection2DArray, Detection2D, ObjectHypothesisWithPose, BoundingBox2D
@@ -51,6 +52,8 @@ def nms_boxes(boxes, scores, iou_threshold=0.45):
     while order.size > 0:
         i = order[0]
         keep.append(i)
+        if order.size == 1:
+            break
 
         xx1 = np.maximum(x1[i], x1[order[1:]])
         yy1 = np.maximum(y1[i], y1[order[1:]])
@@ -61,7 +64,7 @@ def nms_boxes(boxes, scores, iou_threshold=0.45):
         h = np.maximum(0.0, yy2 - yy1)
         inter = w * h
 
-        ovr = inter / (areas[i] + areas[order[1:]] - inter)
+        ovr = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
         inds = np.where(ovr <= iou_threshold)[0]
         order = order[inds + 1]
 
@@ -70,10 +73,10 @@ def nms_boxes(boxes, scores, iou_threshold=0.45):
 
 def rvec_to_quaternion(rvec):
     """
-    Converts OpenCV Rodrigues rotation vector to quaternion (x, y, z, w).
+    Converts OpenCV Rodrigues rotation vector to ROS quaternion [x, y, z, w].
     """
     R, _ = cv2.Rodrigues(rvec)
-    tr = np.trace(R)
+    tr = R[0, 0] + R[1, 1] + R[2, 2]
     if tr > 0:
         S = np.sqrt(tr + 1.0) * 2.0
         qw = 0.25 * S
@@ -115,6 +118,9 @@ class GatePerceptionNode(Node):
         self.declare_parameter('gate_width_m', 1.9)
         self.declare_parameter('gate_height_m', 2.0)
         self.declare_parameter('publish_debug_image', True)
+        self.declare_parameter('enable_monte_carlo_cov', True)
+        self.declare_parameter('mc_samples', 20)
+        self.declare_parameter('corner_noise_sigma', 2.0)
 
         self.model_path = str(self.get_parameter('model_path').value)
         self.conf_threshold = float(self.get_parameter('conf_threshold').value)
@@ -123,6 +129,9 @@ class GatePerceptionNode(Node):
         self.gate_w = float(self.get_parameter('gate_width_m').value)
         self.gate_h = float(self.get_parameter('gate_height_m').value)
         self.publish_debug = bool(self.get_parameter('publish_debug_image').value)
+        self.enable_mc_cov = bool(self.get_parameter('enable_monte_carlo_cov').value)
+        self.mc_samples = int(self.get_parameter('mc_samples').value)
+        self.corner_noise_sigma = float(self.get_parameter('corner_noise_sigma').value)
 
         # 3D object model points for the 4 physical gate corners (top-left, top-right, bottom-right, bottom-left)
         hw = self.gate_w / 2.0
@@ -161,6 +170,9 @@ class GatePerceptionNode(Node):
 
         self.pub_poses_3d = self.create_publisher(
             PoseArray, '/perception/gate_poses_3d', 10
+        )
+        self.pub_covs_3d = self.create_publisher(
+            Float64MultiArray, '/perception/gate_covariances_3d', 10
         )
         self.pub_primary_pose = self.create_publisher(
             PoseStamped, '/perception/gate_pose', 10
@@ -285,6 +297,7 @@ class GatePerceptionNode(Node):
 
         pose_3d_msg = PoseArray()
         pose_3d_msg.header = msg.header
+        cov_3d_msg = Float64MultiArray()
 
         best_detection_pose = None
         best_score = -1.0
@@ -304,7 +317,7 @@ class GatePerceptionNode(Node):
                 d2d.results.append(hyp)
                 det_2d_msg.detections.append(d2d)
 
-            # 3D Pose estimation via IPPE
+            # 3D Pose estimation via IPPE & Monte-Carlo Corner Perturbation
             if self.camera_matrix is not None:
                 corners_2d = np.ascontiguousarray(
                     np.column_stack([det['kp_x'][6:10], det['kp_y'][6:10]]), dtype=np.float32
@@ -325,6 +338,40 @@ class GatePerceptionNode(Node):
                 if success:
                     qx, qy, qz, qw = rvec_to_quaternion(rvec)
                     tx, ty, tz = float(tvec[0][0]), float(tvec[1][0]), float(tvec[2][0])
+                    t_nom = np.array([tx, ty, tz], dtype=np.float64)
+
+                    # Swift Monte-Carlo Corner Perturbation for 3x3 Measurement Covariance (R_cam)
+                    if self.enable_mc_cov:
+                        sampled_translations = []
+                        for _ in range(self.mc_samples):
+                            # Add zero-mean Gaussian jitter to the 4 corner pixels
+                            noise = np.random.normal(0.0, self.corner_noise_sigma, size=corners_2d.shape).astype(np.float32)
+                            perturbed_corners = corners_2d + noise
+
+                            ok_p, rvec_p, tvec_p = cv2.solvePnP(
+                                self.object_points_4p,
+                                perturbed_corners,
+                                self.camera_matrix,
+                                self.dist_coeffs,
+                                flags=cv2.SOLVEPNP_IPPE
+                            )
+                            if ok_p and tvec_p[2][0] > 0.3:
+                                sampled_translations.append(tvec_p.flatten())
+
+                        if len(sampled_translations) >= max(5, self.mc_samples // 2):
+                            samples = np.array(sampled_translations, dtype=np.float64)
+                            diff = samples - t_nom
+                            R_cam = (diff.T @ diff) / float(len(samples) - 1)
+                            # Add minimal regularization floor (0.05m)^2
+                            R_cam += np.eye(3, dtype=np.float64) * 0.0025
+                        else:
+                            d = np.linalg.norm(t_nom)
+                            sig = 8.0 if d > 20.0 else (1.5 + (d / 20.0) * 6.5)
+                            R_cam = np.eye(3, dtype=np.float64) * (sig ** 2)
+                    else:
+                        d = np.linalg.norm(t_nom)
+                        sig = 8.0 if d > 20.0 else (1.5 + (d / 20.0) * 6.5)
+                        R_cam = np.eye(3, dtype=np.float64) * (sig ** 2)
 
                     gate_pose = Pose()
                     gate_pose.position.x = tx
@@ -337,6 +384,7 @@ class GatePerceptionNode(Node):
 
                     det['pose_3d'] = (tx, ty, tz)
                     pose_3d_msg.poses.append(gate_pose)
+                    cov_3d_msg.data.extend(R_cam.flatten().tolist())
 
                     if det['score'] > best_score:
                         best_score = det['score']
@@ -346,6 +394,7 @@ class GatePerceptionNode(Node):
             self.pub_detections_2d.publish(det_2d_msg)
 
         self.pub_poses_3d.publish(pose_3d_msg)
+        self.pub_covs_3d.publish(cov_3d_msg)
 
         if best_detection_pose is not None:
             primary_pose_msg = PoseStamped()
@@ -368,6 +417,9 @@ class GatePerceptionNode(Node):
         pose_msg = PoseArray()
         pose_msg.header = header
         self.pub_poses_3d.publish(pose_msg)
+
+        cov_msg = Float64MultiArray()
+        self.pub_covs_3d.publish(cov_msg)
 
     def publish_debug_overlay(self, frame, detections, header, publish_raw=True, publish_compressed=True):
         vis_img = frame.copy()

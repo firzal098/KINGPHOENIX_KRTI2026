@@ -9,6 +9,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/int32.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose.hpp>
@@ -88,6 +89,16 @@ public:
         sub_pnp_poses_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
             "/perception/gate_poses_3d", sensor_qos,
             std::bind(&MavrosGateEstimator::pnp_poses_callback, this, std::placeholders::_1)
+        );
+
+        sub_pnp_covariances_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
+            "/perception/gate_covariances_3d", sensor_qos,
+            [this](const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+                if (msg) {
+                    latest_pnp_covariances_ = *msg;
+                    has_pnp_covariances_ = true;
+                }
+            }
         );
 
         // Subscribe to active target gate index from controller (ensures only active gate is refined)
@@ -321,6 +332,11 @@ private:
             return;
         }
 
+        // Special Rule: When Gate 4 (index 3) is targeted, do not refine it directly (it shares Gate 3's offset)
+        if (target_idx == 3) {
+            return;
+        }
+
         const Eigen::Matrix3d R_drone = latest_drone_rot_.toRotationMatrix();
         const Eigen::Matrix3d R_total = R_drone * R_cam_to_body_;
         const Eigen::Matrix3d R_drone_pos = Eigen::Matrix3d::Identity() * (drone_sigma_ * drone_sigma_);
@@ -341,18 +357,27 @@ private:
                 continue;
             }
 
-            // Distance-dependent Error Sigma: 8.0m sigma on distance > 20m, down to base sigma at <= 5m
-            double eff_pnp_sigma = pnp_sigma_;
-            if (dist_to_cam > 20.0) {
-                eff_pnp_sigma = 8.0;
-            } else if (dist_to_cam > 5.0) {
-                double ratio = (dist_to_cam - 5.0) / (20.0 - 5.0);
-                eff_pnp_sigma = pnp_sigma_ + ratio * (8.0 - pnp_sigma_);
+            // Extract directional 3x3 Measurement Covariance R_pnp_cam from Swift Monte-Carlo sampling (if available)
+            Eigen::Matrix3d R_pnp_cam = Eigen::Matrix3d::Identity();
+            if (has_pnp_covariances_ && latest_pnp_covariances_.data.size() >= (i + 1) * 9) {
+                size_t off = i * 9;
+                R_pnp_cam << latest_pnp_covariances_.data[off + 0], latest_pnp_covariances_.data[off + 1], latest_pnp_covariances_.data[off + 2],
+                             latest_pnp_covariances_.data[off + 3], latest_pnp_covariances_.data[off + 4], latest_pnp_covariances_.data[off + 5],
+                             latest_pnp_covariances_.data[off + 6], latest_pnp_covariances_.data[off + 7], latest_pnp_covariances_.data[off + 8];
             } else {
-                eff_pnp_sigma = pnp_sigma_;
+                // Distance-dependent Error Sigma Fallback
+                double eff_pnp_sigma = pnp_sigma_;
+                if (dist_to_cam > 20.0) {
+                    eff_pnp_sigma = 8.0;
+                } else if (dist_to_cam > 5.0) {
+                    double ratio = (dist_to_cam - 5.0) / (20.0 - 5.0);
+                    eff_pnp_sigma = pnp_sigma_ + ratio * (8.0 - pnp_sigma_);
+                } else {
+                    eff_pnp_sigma = pnp_sigma_;
+                }
+                R_pnp_cam = Eigen::Matrix3d::Identity() * (eff_pnp_sigma * eff_pnp_sigma);
             }
 
-            const Eigen::Matrix3d R_pnp_cam = Eigen::Matrix3d::Identity() * (eff_pnp_sigma * eff_pnp_sigma);
             const Eigen::Matrix3d R_pnp_world = R_total * R_pnp_cam * R_total.transpose();
             const Eigen::Matrix3d R_meas = R_pnp_world + R_drone_pos;
 
@@ -365,7 +390,7 @@ private:
 
             double m_dist_sq = y.transpose() * S.inverse() * y;
             double euc_dist = y.norm();
-            double dynamic_max_dist = std::max(max_dist_, 2.5 * eff_pnp_sigma);
+            double dynamic_max_dist = std::max(max_dist_, 3.0 * std::sqrt(R_meas.diagonal().maxCoeff()));
 
             if (m_dist_sq < min_mahalanobis_sq && euc_dist <= dynamic_max_dist && m_dist_sq <= mahalanobis_max_sq_) {
                 min_mahalanobis_sq = m_dist_sq;
@@ -378,6 +403,13 @@ private:
         // Apply EKF update exclusively to the active target gate
         if (best_pnp_idx != -1) {
             update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
+
+            // Special Rule: When targeting Gate 3 (index 2), immediately apply its refined offset to Gate 4 (index 3)
+            if (target_idx == 2 && gates_.size() > 3) {
+                Eigen::Vector3d offset_3 = gates_[2].position_enu - gates_[2].prior_pos_enu;
+                gates_[3].position_enu = gates_[3].prior_pos_enu + offset_3;
+                gates_[3].covariance = gates_[2].covariance;
+            }
         }
     }
 
@@ -515,6 +547,7 @@ private:
     // ROS 2 Comms
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_drone_pose_;
     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr sub_pnp_poses_;
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_pnp_covariances_;
     rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr sub_target_gate_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_refined_poses_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_markers_;
@@ -523,6 +556,8 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_gates_;
     rclcpp::TimerBase::SharedPtr pub_timer_;
 
+    std_msgs::msg::Float64MultiArray latest_pnp_covariances_;
+    bool has_pnp_covariances_{false};
     int active_target_gate_idx_{0};
 };
 
