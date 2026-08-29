@@ -224,8 +224,8 @@
 
     // Sprite Label above gate
     let labelText = isSubgate ? `GATE #${id}.${subIndex} (SUB)` : `GATE #${id}`;
-    if (id === 4 && subIndex === 3) {
-      labelText = 'VIRTUAL GATE 4 (+3m)';
+    if (id === 4 && subIndex === 4) {
+      labelText = 'VIRTUAL GATE 4 (+6m)';
     } else if (id === 5 && isSubgate) {
       labelText = 'VIRTUAL EXIT (+3m)';
     }
@@ -246,69 +246,54 @@
 
     // 1. Scene
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x070b12);
-    scene.fog = new THREE.FogExp2(0x070b12, 0.018);
+    scene.background = new THREE.Color(0x060913);
+    scene.fog = new THREE.FogExp2(0x060913, 0.015);
 
     // 2. Camera
-    camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 300);
-    camera.position.set(-6, 6, 8);
+    camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 200);
+    camera.position.set(-6, 5, 8);
 
     // 3. Renderer
     renderer = new THREE.WebGLRenderer({
       canvas: canvasEl,
       antialias: true,
-      alpha: true,
       powerPreference: 'high-performance'
     });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-    // 4. OrbitControls
+    // 4. Orbit Controls
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.06;
-    controls.maxDistance = 120;
-    controls.minDistance = 0.5;
-    controls.maxPolarAngle = Math.PI / 2 + 0.05; // Don't go deep below ground
-    controls.target.set(0, 1.0, 0);
+    controls.dampingFactor = 0.05;
+    controls.maxPolarAngle = Math.PI / 2 + 0.05;
+    controls.minDistance = 1;
+    controls.maxDistance = 80;
+    controls.target.set(0, 1, 0);
 
     // 5. Lighting
-    const ambientLight = new THREE.AmbientLight(0x20354b, 1.8);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     scene.add(ambientLight);
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 2.2);
-    dirLight.position.set(20, 40, 20);
-    dirLight.castShadow = true;
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(10, 20, 10);
     scene.add(dirLight);
 
-    const pointLight = new THREE.PointLight(0x00f0ff, 1.5, 30);
-    pointLight.position.set(0, 5, 0);
-    scene.add(pointLight);
+    const cyanRim = new THREE.PointLight(0x00f0ff, 1.5, 30);
+    cyanRim.position.set(-10, 5, -10);
+    scene.add(cyanRim);
 
-    // 6. Ground Grid (Lowered to -0.6m for clear depth separation)
-    gridHelper = new THREE.GridHelper(80, 80, 0x00f0ff, 0x142333);
-    gridHelper.position.y = -0.6;
+    // 6. Ground Grid (Neon Sci-Fi Arena)
+    gridHelper = new THREE.GridHelper(80, 80, 0x00f0ff, 0x1e293b);
+    gridHelper.position.y = 0;
+    gridHelper.material.opacity = 0.4;
     gridHelper.material.transparent = true;
-    gridHelper.material.opacity = 0.35;
     scene.add(gridHelper);
 
-    // Circular Launch Pad marker
-    const padGeo = new THREE.RingGeometry(0.1, 1.5, 32);
-    const padMat = new THREE.MeshBasicMaterial({
-      color: 0x00f0ff,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.35
-    });
-    const launchPad = new THREE.Mesh(padGeo, padMat);
-    launchPad.rotation.x = Math.PI / 2;
-    launchPad.position.y = -0.59;
-    scene.add(launchPad);
-
-    // 7. Quadcopter Mesh
+    // 7. Drone 3D Mesh
     droneGroup = buildDroneMesh();
-    droneGroup.position.set(0, 1.0, 0);
     scene.add(droneGroup);
 
     // 8. Gate & Sub-Gate Meshes
@@ -324,7 +309,7 @@
     scene.add(g2.group);
     gateGroups.push(g2);
 
-    // Gate 3: Main (sub 0) + Sub-Gate 3.1 (sub 1, offset 1.0m)
+    // Gate 3: Main (sub 0) + Sub-Gate 3.1 (sub 1, offset 1.0m) + Sub-Gate 3.2 (sub 2, offset 2.5m)
     const g3 = buildGateMesh(3, 0, false, 0.0);
     scene.add(g3.group);
     gateGroups.push(g3);
@@ -333,7 +318,11 @@
     scene.add(g3_sub1.group);
     gateGroups.push(g3_sub1);
 
-    // Gate 4: Main (sub 0) + Sub-Gate 4.1 (sub 1, offset 1.0m) + Sub-Gate 4.2 (sub 2, offset 2.0m)
+    const g3_sub2 = buildGateMesh(3, 2, true, 2.5);
+    scene.add(g3_sub2.group);
+    gateGroups.push(g3_sub2);
+
+    // Gate 4: Main (sub 0) + Sub-Gate 4.1 (sub 1, 1m) + Sub-Gate 4.2 (sub 2, 2m) + Sub-Gate 4.3 (sub 3, 3m) + Virtual Gate (+6m)
     const g4 = buildGateMesh(4, 0, false, 0.0);
     scene.add(g4.group);
     gateGroups.push(g4);
@@ -346,7 +335,11 @@
     scene.add(g4_sub2.group);
     gateGroups.push(g4_sub2);
 
-    const g4_virtual = buildGateMesh(4, 3, true, 3.0);
+    const g4_sub3 = buildGateMesh(4, 3, true, 3.0);
+    scene.add(g4_sub3.group);
+    gateGroups.push(g4_sub3);
+
+    const g4_virtual = buildGateMesh(4, 4, true, 6.0);
     scene.add(g4_virtual.group);
     gateGroups.push(g4_virtual);
 

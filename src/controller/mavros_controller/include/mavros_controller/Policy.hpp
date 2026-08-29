@@ -152,18 +152,26 @@ public:
     }
 
     /**
-     * @brief Returns the number of sub-gates for a given main gate index (0-indexed).
-     * Gate 1 (0): 1 gate (subgate 0)
-     * Gate 2 (1): 1 gate (subgate 0)
-     * Gate 3 (2): 2 gates (subgate 0 = main, subgate 1 = +1m in front)
-     * Gate 4 (3): 3 gates (subgate 0 = main, subgate 1 = +1m in front, subgate 2 = +2m in front)
-     * Gate 5 (4): 1 gate (subgate 0)
+     * @brief Number of sub-gates for a given main gate.
+     * When v7 is true:
+     * Gate 3 (2): 3 gates total (1 main + 2 sub-gates)
+     * Gate 4 (3): 4 gates total (1 main + 3 sub-gates)
+     * Default:
+     * Gate 3 (2): 2 gates (1 main + 1 sub-gate)
+     * Gate 4 (3): 3 gates (1 main + 2 sub-gates)
+     * All others: 1 gate
      */
     size_t getSubgateCount(size_t main_gate_idx) const
     {
-        if (main_gate_idx == 2) return 2; // Gate 3: 1 main + 1 sub-gate
-        if (main_gate_idx == 3) return 3; // Gate 4: 1 main + 2 sub-gates
-        return 1;
+        if (v7_) {
+            if (main_gate_idx == 2) return 3; // Gate 3: 1 main + 2 sub-gates (total 3 gates)
+            if (main_gate_idx == 3) return 4; // Gate 4: 1 main + 3 sub-gates (total 4 gates)
+            return 1;
+        } else {
+            if (main_gate_idx == 2) return 2; // Gate 3: 1 main + 1 sub-gate
+            if (main_gate_idx == 3) return 3; // Gate 4: 1 main + 2 sub-gates
+            return 1;
+        }
     }
 
     /**
@@ -171,13 +179,26 @@ public:
      */
     double getSubgateOffset(size_t main_gate_idx, size_t sub_idx) const
     {
-        if (main_gate_idx == 2) {
-            if (sub_idx == 1) return 1.0;
-        } else if (main_gate_idx == 3) {
-            if (sub_idx == 1) return 1.0;
-            if (sub_idx == 2) return 2.0;
+        if (v7_) {
+            if (main_gate_idx == 2) {
+                if (sub_idx == 1) return 1.0;
+                if (sub_idx == 2) return 2.5; // v7: last gate is 2.5m away from first gate
+            } else if (main_gate_idx == 3) {
+                // v7: 4 sub gates with 1m distance each (0m, 1m, 2m, 3m)
+                if (sub_idx == 1) return 1.0;
+                if (sub_idx == 2) return 2.0;
+                if (sub_idx == 3) return 3.0;
+            }
+            return 0.0;
+        } else {
+            if (main_gate_idx == 2) {
+                if (sub_idx == 1) return 1.0;
+            } else if (main_gate_idx == 3) {
+                if (sub_idx == 1) return 1.0;
+                if (sub_idx == 2) return 2.0;
+            }
+            return 0.0;
         }
-        return 0.0;
     }
 
     /**
@@ -375,7 +396,35 @@ public:
         geometry_msgs::msg::Pose next_gate_pose;
 
         size_t total_subgates = getSubgateCount(current_gate_target_index_);
-        if (current_gate_target_index_ == 3 && triple_gate_pass_method_ == 2) {
+        if (v7_ && current_gate_target_index_ == 3) {
+            // v7: When Gate 4 is active target, preview is 1 virtual gate 3.0m away from the last sub-gate (+6.0m from Gate 4 entrance)
+            preview_main_idx = 3;
+            preview_sub_idx = 4; // Virtual Gate (+6.0m)
+            has_next = (!current_gate_poses_.poses.empty() && 3 < current_gate_poses_.poses.size());
+            if (has_next) {
+                geometry_msgs::msg::Pose gate4_pose = getGatePose(3, 0, px, py, pz);
+                next_gate_pose = gate4_pose;
+
+                double qw = gate4_pose.orientation.w;
+                double qx = gate4_pose.orientation.x;
+                double qy = gate4_pose.orientation.y;
+                double qz = gate4_pose.orientation.z;
+                double g_norm = std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+                if (g_norm > 1e-6) {
+                    qw /= g_norm; qx /= g_norm; qy /= g_norm; qz /= g_norm;
+                } else {
+                    qw = 1.0; qx = 0.0; qy = 0.0; qz = 0.0;
+                }
+                double nx = 1.0 - 2.0 * (qy * qy + qz * qz);
+                double ny = 2.0 * (qx * qy + qw * qz);
+                double nz = 2.0 * (qx * qz - qw * qy);
+
+                // 3.0m away from last sub-gate (last sub-gate 3 is at 3.0m, so total 6.0m)
+                next_gate_pose.position.x += 6.0 * nx;
+                next_gate_pose.position.y += 6.0 * ny;
+                next_gate_pose.position.z += 6.0 * nz;
+            }
+        } else if (current_gate_target_index_ == 3 && triple_gate_pass_method_ == 2) {
             // Method 2: Force preview gate to target next main gate (Gate 5) during Gate 4 active target
             preview_main_idx = current_gate_target_index_ + 1;
             preview_sub_idx = 0;
@@ -850,6 +899,8 @@ public:
     int getTripleGatePassMethod() const { return triple_gate_pass_method_; }
     void setMaxAccel(double a_max) { a_max_ = a_max; }
     double getMaxAccel() const { return a_max_; }
+    void setV7(bool v7) { v7_ = v7; }
+    bool getV7() const { return v7_; }
     const std::array<double, 42>& getObservationVector() const { return observation_vector_; }
 
 private:
@@ -884,6 +935,7 @@ private:
     std::array<double, 3> prev_drone_pos_{};
     int triple_gate_pass_method_{1};
     double a_max_{5.6638};
+    bool v7_{false};
 
     double filtered_vx_{0.0};
     double filtered_vy_{0.0};

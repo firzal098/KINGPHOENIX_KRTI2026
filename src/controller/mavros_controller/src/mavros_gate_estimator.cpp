@@ -56,6 +56,7 @@ public:
         this->declare_parameter<bool>("publish_initial_pos", true);
         this->declare_parameter<bool>("blend_gate5_with_mean_1_2", true);
         this->declare_parameter<bool>("tunnel_blend_gate1_and_2", true);
+        this->declare_parameter<bool>("v7", false);
 
         // Safe parameter reading (handles int or double from launch files without crashing)
         prior_sigma_                = get_param_as_double("gate_prior_sigma", 1.5);
@@ -69,6 +70,7 @@ public:
         publish_initial_pos_        = this->get_parameter("publish_initial_pos").as_bool();
         blend_gate5_with_mean_1_2_  = this->get_parameter("blend_gate5_with_mean_1_2").as_bool();
         tunnel_blend_gate1_and_2_   = this->get_parameter("tunnel_blend_gate1_and_2").as_bool();
+        v7_                         = this->get_parameter("v7").as_bool();
 
         // Initialize zero offset defaults until first MAVROS pose is received
         initial_drone_pos_ = Eigen::Vector3d::Zero();
@@ -251,12 +253,20 @@ private:
             init_text.text = "Gate " + std::to_string(state.id) + " (Initial)";
             initial_markers_msg_.markers.push_back(init_text);
 
-            // Add Initial Sub-Gates for Gate 3 (1 sub-gate) and Gate 4 (2 sub-gates)
+            // Add Initial Sub-Gates for Gate 3 (v7: 2 sub-gates, default: 1 sub-gate) and Gate 4 (v7: 3 sub-gates, default: 2 sub-gates)
             std::vector<double> sub_offsets;
-            if (state.id == 3) {
-                sub_offsets = {1.0};
-            } else if (state.id == 4) {
-                sub_offsets = {1.0, 2.0};
+            if (v7_) {
+                if (state.id == 3) {
+                    sub_offsets = {1.0, 2.5}; // v7: last gate is 2.5m away from first gate
+                } else if (state.id == 4) {
+                    sub_offsets = {1.0, 2.0, 3.0}; // v7: 4 sub-gates 1m distance each
+                }
+            } else {
+                if (state.id == 3) {
+                    sub_offsets = {1.0};
+                } else if (state.id == 4) {
+                    sub_offsets = {1.0, 2.0};
+                }
             }
 
             for (size_t sub_k = 0; sub_k < sub_offsets.size(); ++sub_k) {
@@ -587,12 +597,20 @@ private:
             text.text = "Gate " + std::to_string(gate.id);
             array.markers.push_back(text);
 
-            // Add Refined Sub-Gates for Gate 3 (1 sub-gate) and Gate 4 (2 sub-gates)
+            // Add Refined Sub-Gates for Gate 3 (v7: 2 sub-gates, default: 1 sub-gate) and Gate 4 (v7: 3 sub-gates, default: 2 sub-gates)
             std::vector<double> sub_offsets;
-            if (gate.id == 3) {
-                sub_offsets = {1.0};
-            } else if (gate.id == 4) {
-                sub_offsets = {1.0, 2.0};
+            if (v7_) {
+                if (gate.id == 3) {
+                    sub_offsets = {1.0, 2.5}; // v7: last gate is 2.5m away from first gate
+                } else if (gate.id == 4) {
+                    sub_offsets = {1.0, 2.0, 3.0}; // v7: 4 sub-gates 1m distance each
+                }
+            } else {
+                if (gate.id == 3) {
+                    sub_offsets = {1.0};
+                } else if (gate.id == 4) {
+                    sub_offsets = {1.0, 2.0};
+                }
             }
 
             for (size_t sub_k = 0; sub_k < sub_offsets.size(); ++sub_k) {
@@ -636,6 +654,7 @@ private:
     bool publish_initial_pos_;
     bool blend_gate5_with_mean_1_2_{true};
     bool tunnel_blend_gate1_and_2_{true};
+    bool v7_{false};
 
     // Data structures & matrices
     std::vector<GateState> gates_;

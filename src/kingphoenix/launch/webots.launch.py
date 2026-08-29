@@ -114,6 +114,7 @@ def generate_launch_description():
             'max_refine_distance_m':      36.0,
             'blend_gate5_with_mean_1_2':  False,
             'tunnel_blend_gate1_and_2':   False,
+            'v7':                         True,
         }],
     )
 
@@ -125,7 +126,8 @@ def generate_launch_description():
         parameters=[{
             'triple_gate_pass_method': 3,
             #'max_accel': 5.6638,
-            'max_accel': 6.5,
+            'max_accel': 8.5,
+            'v7': True,
         }],
     )
 

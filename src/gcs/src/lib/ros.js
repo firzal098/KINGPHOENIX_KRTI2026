@@ -22,16 +22,16 @@ export const rosbridgeUrl = writable(getDefaultRosbridgeUrl());
 // Active Controller FSM State ('OFF' | 'HOVER' | 'RUN' | 'CLIMBING' | 'LANDING' | 'ARMING' | etc.)
 export const controllerFsmState = writable('OFF');
 
-// Active Target Gate Index (0 = Gate #1, 1 = Gate #2, etc.) & Sub-Gate Index (0, 1, 2)
+// Active Target Gate Index (0 = Gate #1, 1 = Gate #2, etc.) & Sub-Gate Index (0, 1, 2, 3)
 export const targetGateIndex = writable(0);
 export const targetSubGateIndex = writable(0);
 export const targetGateLabel = derived([targetGateIndex, targetSubGateIndex], ([$idx, $sub]) => {
   if ($idx >= 5) return 'ALL GATES CLEARED (5/5)';
   if ($idx === 2) {
-    return `GATE #3 [${$sub + 1}/2]${$sub > 0 ? ' (SUB)' : ''}`;
+    return `GATE #3 [${$sub + 1}/3]${$sub > 0 ? ` (SUB ${$sub})` : ''}`;
   }
   if ($idx === 3) {
-    return `GATE #4 [${$sub + 1}/3]${$sub > 0 ? ` (SUB ${$sub})` : ''}`;
+    return `GATE #4 [${$sub + 1}/4]${$sub > 0 ? ` (SUB ${$sub})` : ''}`;
   }
   return `GATE #${$idx + 1} (${$idx + 1}/5)`;
 });
@@ -40,8 +40,8 @@ export const previewGateIndex = writable(1);
 export const previewSubGateIndex = writable(0);
 
 export const previewGateLabel = derived([previewGateIndex, previewSubGateIndex], ([$pIdx, $pSub]) => {
-  if ($pIdx === 3 && $pSub === 3) {
-    return 'VIRTUAL GATE 4 (+3.0m)';
+  if ($pIdx === 3 && $pSub === 4) {
+    return 'VIRTUAL GATE 4 (+6.0m)';
   }
   if ($pIdx === 4 && $pSub === 1) {
     return 'VIRTUAL EXIT (+3.0m)';

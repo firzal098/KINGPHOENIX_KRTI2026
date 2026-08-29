@@ -133,9 +133,13 @@ public:
         this->declare_parameter<double>("max_accel", 5.6638);
         double max_accel = this->get_parameter("max_accel").as_double();
 
+        this->declare_parameter<bool>("v7", false);
+        bool v7 = this->get_parameter("v7").as_bool();
+
         policy_.init(this, model_path);
         policy_.setTripleGatePassMethod(triple_gate_pass_method);
         policy_.setMaxAccel(max_accel);
+        policy_.setV7(v7);
 
         this->declare_parameter<double>("target_altitude", 1.0);
         target_altitude_ = this->get_parameter("target_altitude").as_double();
