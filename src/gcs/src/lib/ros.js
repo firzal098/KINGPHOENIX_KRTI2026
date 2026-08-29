@@ -22,10 +22,17 @@ export const rosbridgeUrl = writable(getDefaultRosbridgeUrl());
 // Active Controller FSM State ('OFF' | 'HOVER' | 'RUN' | 'CLIMBING' | 'LANDING' | 'ARMING' | etc.)
 export const controllerFsmState = writable('OFF');
 
-// Active Target Gate Index (0 = Gate #1, 1 = Gate #2, etc.)
+// Active Target Gate Index (0 = Gate #1, 1 = Gate #2, etc.) & Sub-Gate Index (0, 1, 2)
 export const targetGateIndex = writable(0);
-export const targetGateLabel = derived(targetGateIndex, ($idx) => {
+export const targetSubGateIndex = writable(0);
+export const targetGateLabel = derived([targetGateIndex, targetSubGateIndex], ([$idx, $sub]) => {
   if ($idx >= 5) return 'ALL GATES CLEARED (5/5)';
+  if ($idx === 2) {
+    return `GATE #3 [${$sub + 1}/2]${$sub > 0 ? ' (SUB)' : ''}`;
+  }
+  if ($idx === 3) {
+    return `GATE #4 [${$sub + 1}/3]${$sub > 0 ? ` (SUB ${$sub})` : ''}`;
+  }
   return `GATE #${$idx + 1} (${$idx + 1}/5)`;
 });
 
@@ -268,20 +275,33 @@ function subscribeTopics() {
     }
   });
 
-  // 1b. Active Target Gate Index (/controller/target_gate_index or /policy/target_gate)
+  // 1b. Active Target Gate Index & Sub-Gate Index
   let prevTargetGate = null;
+  let prevTargetSubGate = null;
 
-  function handleGateAdvance(newIndex) {
-    if (prevTargetGate !== null && newIndex > prevTargetGate) {
-      const passedGateNum = prevTargetGate + 1;
-      if (newIndex >= 5) {
-        addToast(`🏁 ALL GATES CLEARED! Course Completed (Gate #${passedGateNum}/5 Passed)!`, 'success', 5000);
-      } else {
-        addToast(`🎯 GATE #${passedGateNum} PASSED SUCCESSFULLY! Next Target: GATE #${newIndex + 1}`, 'success', 3500);
+  function handleGateAdvance(newIndex, newSubIndex = null) {
+    if (newSubIndex !== null && typeof newSubIndex === 'number') {
+      if (prevTargetSubGate !== null && prevTargetGate === newIndex && newSubIndex > prevTargetSubGate) {
+        addToast(`🎯 GATE #${newIndex + 1} SUB-GATE #${prevTargetSubGate + 1} PASSED! Target: SUB-GATE #${newSubIndex + 1}`, 'success', 3000);
       }
+      prevTargetSubGate = newSubIndex;
+      targetSubGateIndex.set(newSubIndex);
     }
-    prevTargetGate = newIndex;
-    targetGateIndex.set(newIndex);
+
+    if (newIndex !== null && typeof newIndex === 'number') {
+      if (prevTargetGate !== null && newIndex > prevTargetGate) {
+        const passedGateNum = prevTargetGate + 1;
+        if (newIndex >= 5) {
+          addToast(`🏁 ALL GATES CLEARED! Course Completed (Gate #${passedGateNum}/5 Passed)!`, 'success', 5000);
+        } else {
+          addToast(`🎯 GATE #${passedGateNum} CLEARED! Next Target: GATE #${newIndex + 1}`, 'success', 3500);
+        }
+        prevTargetSubGate = 0;
+        targetSubGateIndex.set(0);
+      }
+      prevTargetGate = newIndex;
+      targetGateIndex.set(newIndex);
+    }
   }
 
   const targetGateSub = new ROSLIB.Topic({
@@ -291,7 +311,7 @@ function subscribeTopics() {
   });
   targetGateSub.subscribe((msg) => {
     if (msg && typeof msg.data === 'number') {
-      handleGateAdvance(msg.data);
+      handleGateAdvance(msg.data, null);
     }
   });
 
@@ -302,7 +322,33 @@ function subscribeTopics() {
   });
   policyTargetGateSub.subscribe((msg) => {
     if (msg && typeof msg.data === 'number') {
-      handleGateAdvance(msg.data);
+      handleGateAdvance(msg.data, null);
+    }
+  });
+
+  const targetSubgateSub = new ROSLIB.Topic({
+    ros,
+    name: '/controller/target_subgate_index',
+    messageType: 'std_msgs/msg/Int32',
+  });
+  targetSubgateSub.subscribe((msg) => {
+    if (msg && typeof msg.data === 'number') {
+      let currMain = 0;
+      targetGateIndex.subscribe((v) => (currMain = v))();
+      handleGateAdvance(currMain, msg.data);
+    }
+  });
+
+  const policyTargetSubgateSub = new ROSLIB.Topic({
+    ros,
+    name: '/policy/target_subgate',
+    messageType: 'std_msgs/msg/Int32',
+  });
+  policyTargetSubgateSub.subscribe((msg) => {
+    if (msg && typeof msg.data === 'number') {
+      let currMain = 0;
+      targetGateIndex.subscribe((v) => (currMain = v))();
+      handleGateAdvance(currMain, msg.data);
     }
   });
 
@@ -580,7 +626,9 @@ export function callResetGates() {
     (result) => {
       if (result.success) {
         prevTargetGate = null;
+        prevTargetSubGate = null;
         targetGateIndex.set(0);
+        targetSubGateIndex.set(0);
         addToast(`✅ Gates Reset: ${result.message}`, 'success', 4000);
       } else {
         addToast(`⚠️ Gate Reset: ${result.message}`, 'warning', 4000);
@@ -623,5 +671,6 @@ export function setTargetGate(index) {
   });
   topic.publish(new ROSLIB.Message({ data: targetIndex }));
   targetGateIndex.set(targetIndex);
+  targetSubGateIndex.set(0);
   addToast(`🎯 Active Target switched to: GATE #${targetIndex + 1}`, 'info', 2000);
 }

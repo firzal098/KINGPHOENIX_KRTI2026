@@ -82,13 +82,15 @@ public:
         // Publisher for Active Target Gate Index telemetry (0 = Gate #1, 1 = Gate #2, etc.)
         target_gate_pub_ = this->create_publisher<std_msgs::msg::Int32>(
             "/controller/target_gate_index", 10);
+        target_subgate_pub_ = this->create_publisher<std_msgs::msg::Int32>(
+            "/controller/target_subgate_index", 10);
 
         // Subscriber to manually set Active Target Gate Index from GCS
         set_target_gate_sub_ = this->create_subscription<std_msgs::msg::Int32>(
             "/controller/set_target_gate", qos_reliable,
             [this](const std_msgs::msg::Int32::SharedPtr msg) {
                 if (msg && msg->data >= 0 && msg->data < 5) {
-                    policy_.setTargetGateIndex(static_cast<size_t>(msg->data));
+                    policy_.setTargetGateIndex(static_cast<size_t>(msg->data), 0);
                     RCLCPP_INFO(this->get_logger(), "Active Target Gate switched manually to: Gate #%d", msg->data + 1);
                     publishCurrentState();
                 }
@@ -160,6 +162,12 @@ public:
             std_msgs::msg::Int32 gate_msg;
             gate_msg.data = static_cast<int32_t>(policy_.getTargetGateIndex());
             target_gate_pub_->publish(gate_msg);
+        }
+
+        if (target_subgate_pub_) {
+            std_msgs::msg::Int32 subgate_msg;
+            subgate_msg.data = static_cast<int32_t>(policy_.getTargetSubGateIndex());
+            target_subgate_pub_->publish(subgate_msg);
         }
     }
 
@@ -773,6 +781,7 @@ private:
     rclcpp::Publisher<mavros_msgs::msg::PositionTarget>::SharedPtr local_raw_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr current_state_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr target_gate_pub_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr target_subgate_pub_;
 
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
     rclcpp::Client<mavros_msgs::srv::CommandLong>::SharedPtr command_client_;

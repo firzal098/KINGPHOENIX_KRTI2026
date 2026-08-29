@@ -246,6 +246,36 @@ private:
             init_text.color.a = 0.8f;
             init_text.text = "Gate " + std::to_string(state.id) + " (Initial)";
             initial_markers_msg_.markers.push_back(init_text);
+
+            // Add Initial Sub-Gates for Gate 3 (1 sub-gate) and Gate 4 (2 sub-gates)
+            std::vector<double> sub_offsets;
+            if (state.id == 3) {
+                sub_offsets = {1.0};
+            } else if (state.id == 4) {
+                sub_offsets = {1.0, 2.0};
+            }
+
+            for (size_t sub_k = 0; sub_k < sub_offsets.size(); ++sub_k) {
+                double s_off = sub_offsets[sub_k];
+                Eigen::Vector3d sub_pos = state.position_enu + s_off * state.normal_enu;
+                int sub_id_num = state.id * 10 + (sub_k + 1);
+
+                visualization_msgs::msg::Marker init_sub_box = init_box;
+                init_sub_box.id = sub_id_num;
+                init_sub_box.pose.position.x = sub_pos.x();
+                init_sub_box.pose.position.y = sub_pos.y();
+                init_sub_box.pose.position.z = sub_pos.z();
+                init_sub_box.color.a = 0.25f;
+                initial_markers_msg_.markers.push_back(init_sub_box);
+
+                visualization_msgs::msg::Marker init_sub_text = init_text;
+                init_sub_text.id = sub_id_num + 200;
+                init_sub_text.pose.position.x = sub_pos.x();
+                init_sub_text.pose.position.y = sub_pos.y();
+                init_sub_text.pose.position.z = sub_pos.z() + 1.8;
+                init_sub_text.text = "Gate " + std::to_string(state.id) + "." + std::to_string(sub_k + 1) + " (Sub)";
+                initial_markers_msg_.markers.push_back(init_sub_text);
+            }
         }
     }
 
@@ -514,6 +544,39 @@ private:
             text.color.a = 1.0f;
             text.text = "Gate " + std::to_string(gate.id);
             array.markers.push_back(text);
+
+            // Add Refined Sub-Gates for Gate 3 (1 sub-gate) and Gate 4 (2 sub-gates)
+            std::vector<double> sub_offsets;
+            if (gate.id == 3) {
+                sub_offsets = {1.0};
+            } else if (gate.id == 4) {
+                sub_offsets = {1.0, 2.0};
+            }
+
+            for (size_t sub_k = 0; sub_k < sub_offsets.size(); ++sub_k) {
+                double s_off = sub_offsets[sub_k];
+                Eigen::Vector3d sub_pos = gate.position_enu + s_off * gate.normal_enu;
+                int sub_id_num = gate.id * 10 + (sub_k + 1);
+
+                visualization_msgs::msg::Marker sub_box = box;
+                sub_box.id = sub_id_num;
+                sub_box.pose.position.x = sub_pos.x();
+                sub_box.pose.position.y = sub_pos.y();
+                sub_box.pose.position.z = sub_pos.z();
+                sub_box.color.r = 0.2f;
+                sub_box.color.g = 0.9f;
+                sub_box.color.b = 0.8f;
+                sub_box.color.a = 0.45f;
+                array.markers.push_back(sub_box);
+
+                visualization_msgs::msg::Marker sub_text = text;
+                sub_text.id = sub_id_num + 100;
+                sub_text.pose.position.x = sub_pos.x();
+                sub_text.pose.position.y = sub_pos.y();
+                sub_text.pose.position.z = sub_pos.z() + 1.5;
+                sub_text.text = "Gate " + std::to_string(gate.id) + "." + std::to_string(sub_k + 1) + " (Sub)";
+                array.markers.push_back(sub_text);
+            }
         }
 
         pub_markers_->publish(array);

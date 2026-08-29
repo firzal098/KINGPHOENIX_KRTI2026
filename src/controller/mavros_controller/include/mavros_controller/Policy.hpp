@@ -25,6 +25,7 @@ class Policy {
 public:
     Policy()
     : current_gate_target_index_(0),
+      current_sub_gate_index_(0),
       prev_dot_product_(1.0),
       has_prev_drone_pos_(false),
       has_imu_(false),
@@ -66,9 +67,10 @@ public:
             "/mavros/imu/data", qos_best_effort,
             std::bind(&Policy::imuCallback, this, std::placeholders::_1));
 
-        // 5. Telemetry Publishers for Observation (42D) and Action Space (3D)
+        // 5. Telemetry Publishers for Observation (42D), Action Space (3D), and Subgate Telemetry
         pub_obs_ = node_->create_publisher<std_msgs::msg::Float64MultiArray>("/policy/observation", 10);
         pub_action_ = node_->create_publisher<std_msgs::msg::Float64MultiArray>("/policy/action", 10);
+        pub_target_subgate_ = node_->create_publisher<std_msgs::msg::Int32>("/policy/target_subgate", 10);
 
         // 6. Initialize ONNX Runtime Session
         try {
@@ -140,13 +142,88 @@ public:
     }
 
     /**
+     * @brief Returns the number of sub-gates for a given main gate index (0-indexed).
+     * Gate 1 (0): 1 gate (subgate 0)
+     * Gate 2 (1): 1 gate (subgate 0)
+     * Gate 3 (2): 2 gates (subgate 0 = main, subgate 1 = +1m in front)
+     * Gate 4 (3): 3 gates (subgate 0 = main, subgate 1 = +1m in front, subgate 2 = +2m in front)
+     * Gate 5 (4): 1 gate (subgate 0)
+     */
+    size_t getSubgateCount(size_t main_gate_idx) const
+    {
+        if (main_gate_idx == 2) return 2; // Gate 3: 1 main + 1 sub-gate
+        if (main_gate_idx == 3) return 3; // Gate 4: 1 main + 2 sub-gates
+        return 1;
+    }
+
+    /**
+     * @brief Returns relative forward distance offset along the gate normal for a given sub-gate.
+     */
+    double getSubgateOffset(size_t main_gate_idx, size_t sub_idx) const
+    {
+        if (main_gate_idx == 2) {
+            if (sub_idx == 1) return 1.0;
+        } else if (main_gate_idx == 3) {
+            if (sub_idx == 1) return 1.0;
+            if (sub_idx == 2) return 2.0;
+        }
+        return 0.0;
+    }
+
+    /**
+     * @brief Derives the 3D Pose for a specific gate / sub-gate.
+     * @param main_gate_idx 0-indexed main gate index.
+     * @param sub_idx 0-indexed sub-gate index.
+     * @param default_px, default_py, default_pz Fallback position if pose array empty.
+     */
+    geometry_msgs::msg::Pose getGatePose(size_t main_gate_idx, size_t sub_idx, double default_px = 0.0, double default_py = 0.0, double default_pz = 0.0) const
+    {
+        geometry_msgs::msg::Pose pose;
+        if (!current_gate_poses_.poses.empty() && main_gate_idx < current_gate_poses_.poses.size()) {
+            pose = current_gate_poses_.poses[main_gate_idx];
+        } else {
+            pose.position.x = default_px + 2.0;
+            pose.position.y = default_py;
+            pose.position.z = default_pz;
+            pose.orientation.w = 1.0;
+            pose.orientation.x = 0.0;
+            pose.orientation.y = 0.0;
+            pose.orientation.z = 0.0;
+        }
+
+        double offset = getSubgateOffset(main_gate_idx, sub_idx);
+        if (std::abs(offset) > 1e-4) {
+            // Extract gate normal from quaternion: R_gate * [1, 0, 0]^T
+            double gw = pose.orientation.w;
+            double gx = pose.orientation.x;
+            double gy = pose.orientation.y;
+            double gz = pose.orientation.z;
+            double g_norm = std::sqrt(gw * gw + gx * gx + gy * gy + gz * gz);
+            if (g_norm > 1e-6) {
+                gw /= g_norm; gx /= g_norm; gy /= g_norm; gz /= g_norm;
+            } else {
+                gw = 1.0; gx = 0.0; gy = 0.0; gz = 0.0;
+            }
+            double nx = 1.0 - 2.0 * (gy * gy + gz * gz);
+            double ny = 2.0 * (gx * gy + gw * gz);
+            double nz = 2.0 * (gx * gz - gw * gy);
+
+            pose.position.x += offset * nx;
+            pose.position.y += offset * ny;
+            pose.position.z += offset * nz;
+        }
+
+        return pose;
+    }
+
+    /**
      * @brief Computes 42D observation space vector precisely matching crazyflow_gate_env.py specification.
      * Layout:
      *   [0:3]   vel_B: Linear velocity in Body FLU frame [v_fwd, v_left, v_up]
      *   [3:6]   grav_B: Projected gravity vector in Body FLU frame [r20, r21, r22]
      *   [6:9]   omega_B: Angular velocity in Body FLU frame [roll_rate, pitch_rate, yaw_rate]
-     *   [9:24]  active_gate_15D: Relative active gate corners & center in Body FLU frame [c_tl, c_tr, c_bl, c_br, p_gate]
-     *   [24:39] next_gate_15D: Relative next gate preview corners & center in Body FLU frame (or 0 if last gate)
+     *   [9:24]  active_gate_15D: Relative active gate/sub-gate corners & center in Body FLU frame [c_tl, c_tr, c_bl, c_br, p_gate]
+     *   [24:39] next_gate_15D: Relative next main gate preview corners & center in Body FLU frame (or 0 if last gate)
      *   [39:42] prev_action: Previous 3D control action [v_fwd, v_left, yaw_rate]
      */
     const std::array<double, 42>& get_observation_spaces()
@@ -206,19 +283,8 @@ public:
         const double half_w = 0.75;
         const double half_h = 0.75;
 
-        // 4. Active Gate 15D Features in Body FLU [9:24]
-        geometry_msgs::msg::Pose gate_pose;
-        if (!current_gate_poses_.poses.empty() && current_gate_target_index_ < current_gate_poses_.poses.size()) {
-            gate_pose = current_gate_poses_.poses[current_gate_target_index_];
-        } else {
-            gate_pose.position.x = px + 2.0;
-            gate_pose.position.y = py;
-            gate_pose.position.z = pz;
-            gate_pose.orientation.w = 1.0;
-            gate_pose.orientation.x = 0.0;
-            gate_pose.orientation.y = 0.0;
-            gate_pose.orientation.z = 0.0;
-        }
+        // 4. Active Gate 15D Features in Body FLU [9:24] (Targeting currently active sub-gate)
+        geometry_msgs::msg::Pose gate_pose = getGatePose(current_gate_target_index_, current_sub_gate_index_, px, py, pz);
 
         // Active Gate Yaw in World ENU Frame
         double gw = gate_pose.orientation.w;
@@ -247,7 +313,7 @@ public:
         double c_tl_z = gate_pose.position.z - half_w * lat_z + half_h * vert_z;
 
         double c_tr_x = gate_pose.position.x + half_w * lat_x + half_h * vert_x;
-        double c_tr_y = gate_pose.position.y + half_w * lat_y + half_h * vert_y;
+        double c_tr_y = gate_pose.position.y + half_w * lat_x + half_h * vert_y;
         double c_tr_z = gate_pose.position.z + half_w * lat_z + half_h * vert_z;
 
         double c_bl_x = gate_pose.position.x - half_w * lat_x - half_h * vert_x;
@@ -290,12 +356,12 @@ public:
         observation_vector_[22] = p_gate_flu[1];
         observation_vector_[23] = p_gate_flu[2];
 
-        // 5. Next Gate Preview 15D Features in Body FLU [24:39]
-        size_t next_gate_idx = current_gate_target_index_ + 1;
-        bool has_next = (!current_gate_poses_.poses.empty() && next_gate_idx < current_gate_poses_.poses.size());
+        // 5. Next Gate Preview 15D Features in Body FLU [24:39] (Always previews next MAIN gate: current_gate_target_index_ + 1)
+        size_t next_main_gate_idx = current_gate_target_index_ + 1;
+        bool has_next = (!current_gate_poses_.poses.empty() && next_main_gate_idx < current_gate_poses_.poses.size());
 
         if (has_next) {
-            const auto& next_gate_pose = current_gate_poses_.poses[next_gate_idx];
+            geometry_msgs::msg::Pose next_gate_pose = getGatePose(next_main_gate_idx, 0, px, py, pz);
 
             double ngw = next_gate_pose.orientation.w;
             double ngx = next_gate_pose.orientation.x;
@@ -429,8 +495,10 @@ public:
     }
 
     /**
-     * @brief Evaluates whether the drone has passed the active target gate plane.
+     * @brief Evaluates whether the drone has passed the active target sub-gate plane.
      * Uses robust bidirectional ray-plane intersection and proximity fallback.
+     * If active sub-gate is passed, advances to sub-gate k+1; if no more sub-gates left,
+     * advances to next main gate.
      */
     void checkGatePassage()
     {
@@ -438,7 +506,11 @@ public:
             return;
         }
 
-        const auto& gate_pose = current_gate_poses_.poses[current_gate_target_index_];
+        double px = current_local_pose_.pose.position.x;
+        double py = current_local_pose_.pose.position.y;
+        double pz = current_local_pose_.pose.position.z;
+
+        const auto gate_pose = getGatePose(current_gate_target_index_, current_sub_gate_index_, px, py, pz);
 
         // 1. Extract Gate Normal Vector directly from Pose Quaternion: R_gate * [1, 0, 0]^T
         double gw = gate_pose.orientation.w;
@@ -456,11 +528,6 @@ public:
         double nx = 1.0 - 2.0 * (gy * gy + gz * gz);
         double ny = 2.0 * (gx * gy + gw * gz);
         double nz = 2.0 * (gx * gz - gw * gy);
-
-        // Drone current position relative to gate center
-        double px = current_local_pose_.pose.position.x;
-        double py = current_local_pose_.pose.position.y;
-        double pz = current_local_pose_.pose.position.z;
 
         double dx = px - gate_pose.position.x;
         double dy = py - gate_pose.position.y;
@@ -508,10 +575,19 @@ public:
         }
 
         if (passed) {
-            RCLCPP_INFO(node_->get_logger(), 
-                "Successfully PASSED Gate #%zu! (Dist: %.2fm). Advancing target to next gate.", 
-                current_gate_target_index_ + 1, dist_to_center);
-            current_gate_target_index_++;
+            size_t total_subgates = getSubgateCount(current_gate_target_index_);
+            if (current_sub_gate_index_ + 1 < total_subgates) {
+                current_sub_gate_index_++;
+                RCLCPP_INFO(node_->get_logger(), 
+                    "Successfully PASSED Gate #%zu Sub-gate #%zu! (Dist: %.2fm). Advancing active target to Sub-gate #%zu.", 
+                    current_gate_target_index_ + 1, current_sub_gate_index_, dist_to_center, current_sub_gate_index_ + 1);
+            } else {
+                current_gate_target_index_++;
+                current_sub_gate_index_ = 0;
+                RCLCPP_INFO(node_->get_logger(), 
+                    "Successfully PASSED Gate #%zu (All sub-gates cleared)! (Dist: %.2fm). Advancing to Gate #%zu.", 
+                    current_gate_target_index_, dist_to_center, current_gate_target_index_ + 1);
+            }
             has_prev_drone_pos_ = false;
         } else {
             prev_dot_product_ = curr_dot;
@@ -530,6 +606,11 @@ public:
             std_msgs::msg::Float64MultiArray obs_msg;
             obs_msg.data.assign(observation_vector_.begin(), observation_vector_.end());
             pub_obs_->publish(obs_msg);
+        }
+        if (pub_target_subgate_) {
+            std_msgs::msg::Int32 subgate_msg;
+            subgate_msg.data = static_cast<int32_t>(current_sub_gate_index_);
+            pub_target_subgate_->publish(subgate_msg);
         }
     }
 
@@ -650,12 +731,17 @@ public:
         observation_vector_.fill(0.0);
         has_prev_drone_pos_ = false;
         prev_drone_pos_.fill(0.0);
+        current_gate_target_index_ = 0;
+        current_sub_gate_index_ = 0;
+        prev_dot_product_ = 1.0;
     }
 
     // Getters and Setters
     size_t getTargetGateIndex() const { return current_gate_target_index_; }
-    void setTargetGateIndex(size_t index) {
+    size_t getTargetSubGateIndex() const { return current_sub_gate_index_; }
+    void setTargetGateIndex(size_t index, size_t sub_index = 0) {
         current_gate_target_index_ = index;
+        current_sub_gate_index_ = sub_index;
         has_prev_drone_pos_ = false;
         prev_dot_product_ = 1.0;
     }
@@ -685,6 +771,7 @@ private:
 
     rclcpp::Node* node_{nullptr};
     size_t current_gate_target_index_{0};
+    size_t current_sub_gate_index_{0};
     double prev_dot_product_{1.0};
     bool has_prev_drone_pos_{false};
     std::array<double, 3> prev_drone_pos_{};
@@ -719,6 +806,7 @@ private:
 
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pub_obs_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pub_action_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr pub_target_subgate_;
 };
 
 #endif // POLICY_HPP_

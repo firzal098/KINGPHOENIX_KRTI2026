@@ -7,6 +7,7 @@
     fcuState,
     refinedGatePoses,
     targetGateIndex,
+    targetSubGateIndex,
     targetGateLabel,
     setTargetGate,
     callResetGates,
@@ -168,19 +169,19 @@
     return group;
   }
 
-  function buildGateMesh(id) {
+  function buildGateMesh(id, subIndex = 0, isSubgate = false, offset = 0.0) {
     const group = new THREE.Group();
-    group.name = `gate_${id}`;
+    group.name = isSubgate ? `gate_${id}_sub_${subIndex}` : `gate_${id}`;
 
     const gateWidth = 2.0;
     const gateHeight = 2.0;
-    const beamThick = 0.1;
+    const beamThick = isSubgate ? 0.08 : 0.1;
 
     const frameMat = new THREE.MeshStandardMaterial({
-      color: 0x00f0ff,
+      color: isSubgate ? 0x38bdf8 : 0x00f0ff,
       metalness: 0.6,
       roughness: 0.3,
-      emissive: 0x002233
+      emissive: isSubgate ? 0x001a2e : 0x002233
     });
 
     // Top Beam (Width along Z, so opening faces +X)
@@ -220,12 +221,14 @@
     group.add(ring);
 
     // Sprite Label above gate
-    const label = createTextSprite(`GATE #${id}`, '#00f0ff');
+    const labelText = isSubgate ? `GATE #${id}.${subIndex} (SUB)` : `GATE #${id}`;
+    const labelColor = isSubgate ? '#38bdf8' : '#00f0ff';
+    const label = createTextSprite(labelText, labelColor);
     label.name = 'gate_label';
-    label.position.set(0, gateHeight / 2 + 0.45, 0);
+    label.position.set(0, gateHeight / 2 + (isSubgate ? 0.35 : 0.45), 0);
     group.add(label);
 
-    return { group, frameMat, ring, label, id };
+    return { group, frameMat, ring, label, mainId: id, subIndex, isSubgate, offset };
   }
 
   function initThree() {
@@ -301,13 +304,45 @@
     droneGroup.position.set(0, 1.0, 0);
     scene.add(droneGroup);
 
-    // 8. Gate Meshes (5 gates)
+    // 8. Gate & Sub-Gate Meshes
     gateGroups = [];
-    for (let i = 1; i <= 5; i++) {
-      const gate = buildGateMesh(i);
-      scene.add(gate.group);
-      gateGroups.push(gate);
-    }
+
+    // Gate 1: Main (sub 0)
+    const g1 = buildGateMesh(1, 0, false, 0.0);
+    scene.add(g1.group);
+    gateGroups.push(g1);
+
+    // Gate 2: Main (sub 0)
+    const g2 = buildGateMesh(2, 0, false, 0.0);
+    scene.add(g2.group);
+    gateGroups.push(g2);
+
+    // Gate 3: Main (sub 0) + Sub-Gate 3.1 (sub 1, offset 1.0m)
+    const g3 = buildGateMesh(3, 0, false, 0.0);
+    scene.add(g3.group);
+    gateGroups.push(g3);
+
+    const g3_sub1 = buildGateMesh(3, 1, true, 1.0);
+    scene.add(g3_sub1.group);
+    gateGroups.push(g3_sub1);
+
+    // Gate 4: Main (sub 0) + Sub-Gate 4.1 (sub 1, offset 1.0m) + Sub-Gate 4.2 (sub 2, offset 2.0m)
+    const g4 = buildGateMesh(4, 0, false, 0.0);
+    scene.add(g4.group);
+    gateGroups.push(g4);
+
+    const g4_sub1 = buildGateMesh(4, 1, true, 1.0);
+    scene.add(g4_sub1.group);
+    gateGroups.push(g4_sub1);
+
+    const g4_sub2 = buildGateMesh(4, 2, true, 2.0);
+    scene.add(g4_sub2.group);
+    gateGroups.push(g4_sub2);
+
+    // Gate 5: Main (sub 0)
+    const g5 = buildGateMesh(5, 0, false, 0.0);
+    scene.add(g5.group);
+    gateGroups.push(g5);
 
     // 9. Permanent Flight Trajectory Ribbon (Cyan Line)
     const trailGeo = new THREE.BufferGeometry();
@@ -391,25 +426,23 @@
 
     let poses = $refinedGatePoses;
     const currentTarget = $targetGateIndex;
+    const currentSubTarget = $targetSubGateIndex;
 
-    gateGroups.forEach((gate, idx) => {
+    // 1. Compute Base World/Local Poses for 5 Main Gates
+    const mainGatePoses = [];
+    for (let i = 0; i < 5; i++) {
       let posX = 0, posY = 1.0, posZ = 0;
       let relGateYawRad = 0;
 
-      if (poses && poses.length > idx && initialDronePos) {
-        const p = poses[idx];
-        // current_gate_pos - initial_drone_pos
+      if (poses && poses.length > i && initialDronePos) {
+        const p = poses[i];
         const relPos = getRelPose(p.x, p.y, p.z);
         posX = relPos.x;
         posY = 1.0; // Gates centered at nominal 1.0m height
         posZ = relPos.z;
-
-        // Gate orientation in ENU world frame
-        const q_yaw_rad = Math.atan2(2.0 * (p.qw * p.qz + p.qx * p.qy), 1.0 - 2.0 * (p.qy * p.qy + p.qz * p.qz));
-        relGateYawRad = q_yaw_rad;
+        relGateYawRad = Math.atan2(2.0 * (p.qw * p.qz + p.qx * p.qy), 1.0 - 2.0 * (p.qy * p.qy + p.qz * p.qz));
       } else {
-        // Fallback default prior in initial takeoff frame
-        const p = defaultPriorsRDF[idx];
+        const p = defaultPriorsRDF[i];
         const fwd = p.z;
         const left = -p.x;
         const initYawRad = initialDronePos ? (initialDronePos.yaw * (Math.PI / 180)) : (Math.PI / 2);
@@ -418,59 +451,92 @@
         posX = dx;
         posY = 1.0;
         posZ = -dy;
-        relGateYawRad = (idx === 2 ? (initYawRad - Math.PI / 2) : initYawRad);
+        relGateYawRad = (i === 2 ? (initYawRad - Math.PI / 2) : initYawRad);
       }
+      mainGatePoses.push({ posX, posY, posZ, yaw: relGateYawRad });
 
-      gate.group.position.set(posX, posY, posZ);
-      gate.group.rotation.set(0, relGateYawRad, 0);
-
-      // Record Gate Estimation Correction History Trail
-      const lastP = lastGatePos[idx];
+      // Record Gate Estimation Correction History Trail (for main gate i)
+      const lastP = lastGatePos[i];
       const distSq = lastP
         ? Math.pow(posX - lastP.x, 2) + Math.pow(posY - lastP.y, 2) + Math.pow(posZ - lastP.z, 2)
         : 999;
 
       if (distSq > 0.0001) { // Shift > 1cm
-        if (gateTrailPositions[idx].length === 0) {
-          gateTrailPositions[idx].push(posX, posY, posZ, posX, posY, posZ);
-          if (priorOriginMarkers[idx]) {
-            priorOriginMarkers[idx].position.set(posX, posY, posZ);
-            priorOriginMarkers[idx].visible = true;
+        if (gateTrailPositions[i].length === 0) {
+          gateTrailPositions[i].push(posX, posY, posZ, posX, posY, posZ);
+          if (priorOriginMarkers[i]) {
+            priorOriginMarkers[i].position.set(posX, posY, posZ);
+            priorOriginMarkers[i].visible = true;
           }
         } else {
-          gateTrailPositions[idx].push(posX, posY, posZ);
+          gateTrailPositions[i].push(posX, posY, posZ);
         }
-        lastGatePos[idx] = { x: posX, y: posY, z: posZ };
+        lastGatePos[i] = { x: posX, y: posY, z: posZ };
 
-        if (gateTrailLines[idx] && gateTrailPositions[idx].length >= 6) {
-          gateTrailLines[idx].geometry.setAttribute(
+        if (gateTrailLines[i] && gateTrailPositions[i].length >= 6) {
+          gateTrailLines[i].geometry.setAttribute(
             'position',
-            new THREE.Float32BufferAttribute(gateTrailPositions[idx], 3)
+            new THREE.Float32BufferAttribute(gateTrailPositions[i], 3)
           );
-          gateTrailLines[idx].geometry.attributes.position.needsUpdate = true;
-          gateTrailLines[idx].geometry.computeBoundingSphere();
+          gateTrailLines[i].geometry.attributes.position.needsUpdate = true;
+          gateTrailLines[i].geometry.computeBoundingSphere();
         }
       }
+    }
 
-      // Dynamic Color Highlighting based on Target Gate
-      if (idx === currentTarget) {
-        // Active Target Gate -> Vibrant Emerald Green
-        gate.frameMat.color.setHex(0x10b981);
-        gate.frameMat.emissive.setHex(0x064e3b);
-        gate.ring.visible = true;
-      } else if (idx === currentTarget + 1) {
-        // Next Preview Gate -> Amber Gold
+    // 2. Position and Color each Gate & Sub-Gate
+    gateGroups.forEach((gate) => {
+      const mainIdx = gate.mainId - 1;
+      const base = mainGatePoses[mainIdx];
+      const offset = gate.offset || 0.0;
+
+      // In Three.js coordinates:
+      // Forward normal vector in Three.js (Three.X = cos(yaw), Three.Z = -sin(yaw))
+      const offX = offset * Math.cos(base.yaw);
+      const offZ = -offset * Math.sin(base.yaw);
+
+      const posX = base.posX + offX;
+      const posY = base.posY;
+      const posZ = base.posZ + offZ;
+
+      gate.group.position.set(posX, posY, posZ);
+      gate.group.rotation.set(0, base.yaw, 0);
+
+      // Highlighting logic:
+      const isCurrentMain = (mainIdx === currentTarget);
+      const isNextMain = (mainIdx === currentTarget + 1);
+      const isPassedMain = (mainIdx < currentTarget);
+
+      if (isCurrentMain) {
+        if (gate.subIndex === currentSubTarget) {
+          // Active Target Gate/Sub-gate -> Vibrant Emerald Green with Pulse Ring
+          gate.frameMat.color.setHex(0x10b981);
+          gate.frameMat.emissive.setHex(0x064e3b);
+          gate.ring.visible = true;
+        } else if (gate.subIndex < currentSubTarget) {
+          // Passed sub-gate -> Dim Silver
+          gate.frameMat.color.setHex(0x475569);
+          gate.frameMat.emissive.setHex(0x0f172a);
+          gate.ring.visible = false;
+        } else {
+          // Upcoming sub-gate -> Cyber Cyan
+          gate.frameMat.color.setHex(0x38bdf8);
+          gate.frameMat.emissive.setHex(0x0284c7);
+          gate.ring.visible = false;
+        }
+      } else if (isNextMain && gate.subIndex === 0) {
+        // Next Preview Main Gate -> Amber Gold
         gate.frameMat.color.setHex(0xf59e0b);
         gate.frameMat.emissive.setHex(0x78350f);
         gate.ring.visible = false;
-      } else if (idx < currentTarget) {
-        // Passed Gate -> Dim Silver/Cyan
+      } else if (isPassedMain) {
+        // Passed Gate -> Dim Silver/Slate
         gate.frameMat.color.setHex(0x475569);
         gate.frameMat.emissive.setHex(0x0f172a);
         gate.ring.visible = false;
       } else {
         // Upcoming Gate -> Cyber Cyan
-        gate.frameMat.color.setHex(0x00f0ff);
+        gate.frameMat.color.setHex(gate.isSubgate ? 0x38bdf8 : 0x00f0ff);
         gate.frameMat.emissive.setHex(0x002233);
         gate.ring.visible = false;
       }
