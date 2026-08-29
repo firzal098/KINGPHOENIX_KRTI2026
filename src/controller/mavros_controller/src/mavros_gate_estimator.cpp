@@ -439,6 +439,7 @@ private:
                 Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
                 Eigen::Vector3d offset_5_raw = best_z_meas - gates_[4].prior_pos_enu;
 
+                // Equal 3-way mean: (Gate 1 + Gate 2 + Gate 5) / 3
                 Eigen::Vector3d mean_offset_1_2_5 = (offset_1 + offset_2 + offset_5_raw) / 3.0;
                 Eigen::Vector3d z_meas_blended = gates_[4].prior_pos_enu + mean_offset_1_2_5;
 
@@ -447,10 +448,12 @@ private:
                 update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
             }
 
-            // When Gate 1 or Gate 2 is refined, propagate their mean correction offset to Gate 3, 4, and 5
+            // When Gate 1 or Gate 2 is refined, propagate their equal mean correction offset to Gate 3, 4, and 5
             if (target_idx == 0 || target_idx == 1) {
                 Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
                 Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
+                
+                // Equal mean offset
                 Eigen::Vector3d mean_offset = (target_idx == 0) ? offset_1 : (0.5 * (offset_1 + offset_2));
 
                 if (gates_.size() > 2) {
