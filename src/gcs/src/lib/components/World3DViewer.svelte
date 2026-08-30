@@ -224,7 +224,9 @@
 
     // Sprite Label above gate
     let labelText = isSubgate ? `GATE #${id}.${subIndex} (SUB)` : `GATE #${id}`;
-    if (id === 4 && subIndex === 4) {
+    if (id === 2 && subIndex === 1) {
+      labelText = 'VIRTUAL WP (+1.5m, +1.0m R)';
+    } else if (id === 4 && subIndex === 4) {
       labelText = 'VIRTUAL GATE 4 (+6m)';
     } else if (id === 5 && isSubgate) {
       labelText = 'VIRTUAL EXIT (+3m)';
@@ -304,12 +306,16 @@
     scene.add(g1.group);
     gateGroups.push(g1);
 
-    // Gate 2: Main (sub 0)
+    // Gate 2: Main (sub 0) + Virtual Waypoint (sub 1, +1.5m fwd, +1.0m right)
     const g2 = buildGateMesh(2, 0, false, 0.0);
     scene.add(g2.group);
     gateGroups.push(g2);
 
-    // Gate 3: Main (sub 0) + Sub-Gate 3.1 (sub 1, offset 1.0m) + Sub-Gate 3.2 (sub 2, offset 2.5m)
+    const g2_virtual = buildGateMesh(2, 1, true, 1.5);
+    scene.add(g2_virtual.group);
+    gateGroups.push(g2_virtual);
+
+    // Gate 3: Main (sub 0) + Sub-Gate 3.1 (sub 1, offset 1.0m) + Sub-Gate 3.2 (sub 2, offset 2.0m)
     const g3 = buildGateMesh(3, 0, false, 0.0);
     scene.add(g3.group);
     gateGroups.push(g3);
@@ -318,7 +324,7 @@
     scene.add(g3_sub1.group);
     gateGroups.push(g3_sub1);
 
-    const g3_sub2 = buildGateMesh(3, 2, true, 2.5);
+    const g3_sub2 = buildGateMesh(3, 2, true, 2.0);
     scene.add(g3_sub2.group);
     gateGroups.push(g3_sub2);
 
@@ -500,8 +506,16 @@
 
       // In Three.js coordinates:
       // Forward normal vector in Three.js (Three.X = cos(yaw), Three.Z = -sin(yaw))
-      const offX = offset * Math.cos(base.yaw);
-      const offZ = -offset * Math.sin(base.yaw);
+      let offX = offset * Math.cos(base.yaw);
+      let offZ = -offset * Math.sin(base.yaw);
+
+      if (gate.mainId === 2 && gate.subIndex === 1) {
+        // Gate 2.1 Virtual Waypoint: 1.5m past Gate 2 exit (-fwd), -1.0m right (towards Gate 3 turn)
+        const fwdDist = -1.5;
+        const rightDist = -1.0;
+        offX = fwdDist * Math.cos(base.yaw) + rightDist * Math.sin(base.yaw);
+        offZ = -fwdDist * Math.sin(base.yaw) + rightDist * Math.cos(base.yaw);
+      }
 
       const posX = base.posX + offX;
       const posY = base.posY;

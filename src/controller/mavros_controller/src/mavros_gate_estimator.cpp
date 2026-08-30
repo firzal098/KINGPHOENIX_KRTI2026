@@ -56,6 +56,8 @@ public:
         this->declare_parameter<bool>("publish_initial_pos", true);
         this->declare_parameter<bool>("blend_gate5_with_mean_1_2", true);
         this->declare_parameter<bool>("tunnel_blend_gate1_and_2", true);
+        this->declare_parameter<bool>("use_1d_right_axis_offset", true);
+        this->declare_parameter<bool>("enable_gate3_pnp_refinement", true);
         this->declare_parameter<bool>("v7", false);
 
         // Safe parameter reading (handles int or double from launch files without crashing)
@@ -70,6 +72,8 @@ public:
         publish_initial_pos_        = this->get_parameter("publish_initial_pos").as_bool();
         blend_gate5_with_mean_1_2_  = this->get_parameter("blend_gate5_with_mean_1_2").as_bool();
         tunnel_blend_gate1_and_2_   = this->get_parameter("tunnel_blend_gate1_and_2").as_bool();
+        use_1d_right_axis_offset_   = this->get_parameter("use_1d_right_axis_offset").as_bool();
+        enable_gate3_pnp_refinement_= this->get_parameter("enable_gate3_pnp_refinement").as_bool();
         v7_                         = this->get_parameter("v7").as_bool();
 
         // Initialize zero offset defaults until first MAVROS pose is received
@@ -257,7 +261,7 @@ private:
             std::vector<double> sub_offsets;
             if (v7_) {
                 if (state.id == 3) {
-                    sub_offsets = {1.0, 2.5}; // v7: last gate is 2.5m away from first gate
+                    sub_offsets = {1.0, 2.0}; // v7: 3 gates total with 1m distance each (0m, 1m, 2m)
                 } else if (state.id == 4) {
                     sub_offsets = {1.0, 2.0, 3.0}; // v7: 4 sub-gates 1m distance each
                 }
@@ -377,7 +381,7 @@ private:
         }
 
         // Special Rule: Skip direct PnP refinement for Gate 3 (idx 2) and Gate 4 (idx 3);
-        // they are refined using the mean offset from Gate 1 and Gate 2.
+        // they are refined using the offset from Gate 1 and Gate 2.
         if (target_idx == 2 || target_idx == 3) {
             return;
         }
@@ -465,30 +469,43 @@ private:
                 Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
                 Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
                 
-                Eigen::Vector3d mean_offset = Eigen::Vector3d::Zero();
+                Eigen::Vector3d raw_offset = Eigen::Vector3d::Zero();
                 bool should_propagate = false;
 
                 if (tunnel_blend_gate1_and_2_) {
                     // Blend Gate 1 & 2
-                    mean_offset = (target_idx == 0) ? offset_1 : (0.5 * (offset_1 + offset_2));
+                    raw_offset = (target_idx == 0) ? offset_1 : (0.5 * (offset_1 + offset_2));
                     should_propagate = true;
                 } else {
                     // Gate 2 only (ignore Gate 1 updates for tunnels)
                     if (target_idx == 1) {
-                        mean_offset = offset_2;
+                        raw_offset = offset_2;
                         should_propagate = true;
                     }
                 }
 
                 if (should_propagate) {
+                    Eigen::Vector3d offset_to_apply = raw_offset;
+                    if (use_1d_right_axis_offset_) {
+                        // Compute World-Space Mean Right-Normal Vector of Gate 1 and 2
+                        const Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
+                        Eigen::Vector3d r1 = (gates_[0].normal_enu.cross(up_enu)).normalized();
+                        Eigen::Vector3d r2 = (gates_[1].normal_enu.cross(up_enu)).normalized();
+                        Eigen::Vector3d r_mean_1_2 = (tunnel_blend_gate1_and_2_ ? (r1 + r2) : r2).normalized();
+
+                        // 1D Scalar projection along World Right Axis
+                        double delta_right = raw_offset.dot(r_mean_1_2);
+                        offset_to_apply = delta_right * r_mean_1_2;
+                    }
+
                     if (gates_.size() > 2) {
-                        gates_[2].position_enu = gates_[2].prior_pos_enu + mean_offset;
+                        gates_[2].position_enu = gates_[2].prior_pos_enu + offset_to_apply;
                     }
                     if (gates_.size() > 3) {
-                        gates_[3].position_enu = gates_[3].prior_pos_enu + mean_offset;
+                        gates_[3].position_enu = gates_[3].prior_pos_enu + offset_to_apply;
                     }
                     if (gates_.size() > 4 && blend_gate5_with_mean_1_2_) {
-                        gates_[4].position_enu = gates_[4].prior_pos_enu + 0.40 * offset_2;
+                        gates_[4].position_enu = gates_[4].prior_pos_enu + 0.40 * offset_to_apply;
                     }
                 }
             }
@@ -601,7 +618,7 @@ private:
             std::vector<double> sub_offsets;
             if (v7_) {
                 if (gate.id == 3) {
-                    sub_offsets = {1.0, 2.5}; // v7: last gate is 2.5m away from first gate
+                    sub_offsets = {1.0, 2.0}; // v7: 3 gates total with 1m distance each (0m, 1m, 2m)
                 } else if (gate.id == 4) {
                     sub_offsets = {1.0, 2.0, 3.0}; // v7: 4 sub-gates 1m distance each
                 }
@@ -654,6 +671,8 @@ private:
     bool publish_initial_pos_;
     bool blend_gate5_with_mean_1_2_{true};
     bool tunnel_blend_gate1_and_2_{true};
+    bool use_1d_right_axis_offset_{true};
+    bool enable_gate3_pnp_refinement_{true};
     bool v7_{false};
 
     // Data structures & matrices

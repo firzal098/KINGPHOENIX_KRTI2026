@@ -164,10 +164,12 @@ public:
     size_t getSubgateCount(size_t main_gate_idx) const
     {
         if (v7_) {
+            if (main_gate_idx == 1) return 2; // Gate 2: 1 main + 1 virtual waypoint (+1.5m fwd, +1.0m right)
             if (main_gate_idx == 2) return 3; // Gate 3: 1 main + 2 sub-gates (total 3 gates)
             if (main_gate_idx == 3) return 4; // Gate 4: 1 main + 3 sub-gates (total 4 gates)
             return 1;
         } else {
+            if (main_gate_idx == 1) return 2; // Gate 2: 1 main + 1 virtual waypoint (+1.5m fwd, +1.0m right)
             if (main_gate_idx == 2) return 2; // Gate 3: 1 main + 1 sub-gate
             if (main_gate_idx == 3) return 3; // Gate 4: 1 main + 2 sub-gates
             return 1;
@@ -182,7 +184,7 @@ public:
         if (v7_) {
             if (main_gate_idx == 2) {
                 if (sub_idx == 1) return 1.0;
-                if (sub_idx == 2) return 2.5; // v7: last gate is 2.5m away from first gate
+                if (sub_idx == 2) return 2.0; // v7: 3 gates with 1m distance each (0m, 1m, 2m)
             } else if (main_gate_idx == 3) {
                 // v7: 4 sub gates with 1m distance each (0m, 1m, 2m, 3m)
                 if (sub_idx == 1) return 1.0;
@@ -220,6 +222,33 @@ public:
             pose.orientation.x = 0.0;
             pose.orientation.y = 0.0;
             pose.orientation.z = 0.0;
+        }
+
+        if (main_gate_idx == 1 && sub_idx == 1) {
+            // Virtual Waypoint: 1.5m past Gate 2 exit along flight path (-nx) and 1.0m to the right (+rx towards Gate 3)
+            double gw = pose.orientation.w;
+            double gx = pose.orientation.x;
+            double gy = pose.orientation.y;
+            double gz = pose.orientation.z;
+            double g_norm = std::sqrt(gw * gw + gx * gx + gy * gy + gz * gz);
+            if (g_norm > 1e-6) {
+                gw /= g_norm; gx /= g_norm; gy /= g_norm; gz /= g_norm;
+            } else {
+                gw = 1.0; gx = 0.0; gy = 0.0; gz = 0.0;
+            }
+            double nx = 1.0 - 2.0 * (gy * gy + gz * gz);
+            double ny = 2.0 * (gx * gy + gw * gz);
+            double nz = 2.0 * (gx * gz - gw * gy);
+
+            // Right vector = normal x up (where up is [0, 0, 1]) -> [ny, -nx, 0]
+            double rx = ny;
+            double ry = -nx;
+            double rz = 0.0;
+
+            pose.position.x += -1.5 * nx - 1.0 * rx;
+            pose.position.y += -1.5 * ny - 1.0 * ry;
+            pose.position.z += -1.5 * nz - 1.0 * rz;
+            return pose;
         }
 
         double offset = getSubgateOffset(main_gate_idx, sub_idx);

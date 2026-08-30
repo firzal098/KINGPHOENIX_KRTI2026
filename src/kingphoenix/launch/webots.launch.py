@@ -29,7 +29,7 @@ def generate_launch_description():
 
     fov_arg = DeclareLaunchArgument(
         'fov',
-        default_value='1.0',
+        default_value='1.03',
         description='Horizontal field of view in radians (~60 degrees)'
     )
 
@@ -114,6 +114,8 @@ def generate_launch_description():
             'max_refine_distance_m':      36.0,
             'blend_gate5_with_mean_1_2':  False,
             'tunnel_blend_gate1_and_2':   False,
+            'use_1d_right_axis_offset':   True,
+            'enable_gate3_pnp_refinement': True,
             'v7':                         True,
         }],
     )

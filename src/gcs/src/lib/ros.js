@@ -27,6 +27,9 @@ export const targetGateIndex = writable(0);
 export const targetSubGateIndex = writable(0);
 export const targetGateLabel = derived([targetGateIndex, targetSubGateIndex], ([$idx, $sub]) => {
   if ($idx >= 5) return 'ALL GATES CLEARED (5/5)';
+  if ($idx === 1 && $sub === 1) {
+    return 'GATE #2.1 (VIRTUAL WP)';
+  }
   if ($idx === 2) {
     return `GATE #3 [${$sub + 1}/3]${$sub > 0 ? ` (SUB ${$sub})` : ''}`;
   }
@@ -40,6 +43,9 @@ export const previewGateIndex = writable(1);
 export const previewSubGateIndex = writable(0);
 
 export const previewGateLabel = derived([previewGateIndex, previewSubGateIndex], ([$pIdx, $pSub]) => {
+  if ($pIdx === 1 && $pSub === 1) {
+    return 'GATE #2.1 (VIRTUAL WP)';
+  }
   if ($pIdx === 3 && $pSub === 4) {
     return 'VIRTUAL GATE 4 (+6.0m)';
   }
