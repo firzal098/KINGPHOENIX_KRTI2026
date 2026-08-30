@@ -380,9 +380,9 @@ private:
             return;
         }
 
-        // Special Rule: Skip direct PnP refinement for Gate 3 (idx 2) and Gate 4 (idx 3);
-        // they are refined using the offset from Gate 1 and Gate 2.
-        if (target_idx == 2 || target_idx == 3) {
+        // Special Rule: Skip direct PnP refinement for Gate 4 (idx 3);
+        // Gate 4 inherits the offset from the tunnel entrance.
+        if (target_idx == 3) {
             return;
         }
 
@@ -460,6 +460,45 @@ private:
                 Eigen::Vector3d z_meas_blended = gates_[4].prior_pos_enu + blended_offset;
 
                 update_gate_kalman(gates_[4], z_meas_blended, best_R_meas, min_mahalanobis_sq);
+            } else if (target_idx == 2) {
+                // When targeting Gate 3, preserve the upstream offset from Gate 1/2 and refine along Gate 3's Right-Normal axis
+                const Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
+                Eigen::Vector3d r1 = (gates_[0].normal_enu.cross(up_enu)).normalized();
+                Eigen::Vector3d r2 = (gates_[1].normal_enu.cross(up_enu)).normalized();
+                Eigen::Vector3d r_mean_1_2 = (tunnel_blend_gate1_and_2_ ? (r1 + r2) : r2).normalized();
+
+                Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
+                Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
+                Eigen::Vector3d raw_offset_1_2 = tunnel_blend_gate1_and_2_ ? (0.5 * (offset_1 + offset_2)) : offset_2;
+
+                Eigen::Vector3d offset_1_2_applied = raw_offset_1_2;
+                if (use_1d_right_axis_offset_) {
+                    double delta_right_1_2 = raw_offset_1_2.dot(r_mean_1_2);
+                    offset_1_2_applied = delta_right_1_2 * r_mean_1_2;
+                }
+
+                // Base position preserving Gate 1/2 offset
+                Eigen::Vector3d base_pos_gate3 = gates_[2].prior_pos_enu + offset_1_2_applied;
+
+                // Project Gate 3 PnP deviation strictly along Gate 3's Right-Normal axis
+                Eigen::Vector3d r3 = (gates_[2].normal_enu.cross(up_enu)).normalized();
+                Eigen::Vector3d delta_z3 = best_z_meas - base_pos_gate3;
+
+                Eigen::Vector3d z_meas_gate3;
+                if (use_1d_right_axis_offset_) {
+                    double delta_r3 = delta_z3.dot(r3);
+                    z_meas_gate3 = base_pos_gate3 + delta_r3 * r3;
+                } else {
+                    z_meas_gate3 = best_z_meas;
+                }
+
+                update_gate_kalman(gates_[2], z_meas_gate3, best_R_meas, min_mahalanobis_sq);
+
+                // Synchronize Gate 4 to maintain the exact same total world-space offset as Gate 3
+                Eigen::Vector3d total_offset_3 = gates_[2].position_enu - gates_[2].prior_pos_enu;
+                if (gates_.size() > 3) {
+                    gates_[3].position_enu = gates_[3].prior_pos_enu + total_offset_3;
+                }
             } else {
                 update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
             }

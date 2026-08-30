@@ -184,7 +184,7 @@ public:
         if (v7_) {
             if (main_gate_idx == 2) {
                 if (sub_idx == 1) return 1.0;
-                if (sub_idx == 2) return 2.0; // v7: 3 gates with 1m distance each (0m, 1m, 2m)
+                if (sub_idx == 2) return 2.0; // v7: 3 gates total with 1m distance each (0m, 1m, 2m)
             } else if (main_gate_idx == 3) {
                 // v7: 4 sub gates with 1m distance each (0m, 1m, 2m, 3m)
                 if (sub_idx == 1) return 1.0;
@@ -664,6 +664,15 @@ public:
             prev_action_[0] = std::clamp(raw_vfwd,     -4.0,  16.0);
             prev_action_[1] = std::clamp(raw_vleft,    -8.0,   8.0);
             prev_action_[2] = std::clamp(raw_yaw_rate, -15.707963, 15.707963);
+
+            // When targeting Gate 3, limit horizontal action magnitude [v_fwd, v_left] to 2.0
+            if (current_gate_target_index_ == 2) {
+                double mag = std::sqrt(prev_action_[0] * prev_action_[0] + prev_action_[1] * prev_action_[1]);
+                if (mag > 2.0) {
+                    prev_action_[0] = (prev_action_[0] / mag) * 2.0;
+                    prev_action_[1] = (prev_action_[1] / mag) * 2.0;
+                }
+            }
         }
         catch (const std::exception& e) {
             RCLCPP_ERROR(node_->get_logger(), "ONNX Inference step failed: %s", e.what());
