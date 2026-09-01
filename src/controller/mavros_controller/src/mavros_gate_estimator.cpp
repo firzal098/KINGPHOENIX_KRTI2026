@@ -53,6 +53,7 @@ public:
         this->declare_parameter<double>("max_prior_deviation_m", 1.5);
         this->declare_parameter<double>("max_refine_tilt_deg", 18.0);
         this->declare_parameter<double>("max_refine_distance_m", 36.0);
+        this->declare_parameter<double>("camera_pitch_deg", 0.0);
         this->declare_parameter<bool>("publish_initial_pos", true);
         this->declare_parameter<bool>("blend_gate5_with_mean_1_2", true);
         this->declare_parameter<bool>("tunnel_blend_gate1_and_2", true);
@@ -69,6 +70,7 @@ public:
         max_prior_deviation_        = get_param_as_double("max_prior_deviation_m", 1.5);
         max_tilt_rad_               = get_param_as_double("max_refine_tilt_deg", 18.0) * (M_PI / 180.0);
         max_refine_dist_            = get_param_as_double("max_refine_distance_m", 36.0);
+        camera_pitch_deg_           = get_param_as_double("camera_pitch_deg", 0.0);
         publish_initial_pos_        = this->get_parameter("publish_initial_pos").as_bool();
         blend_gate5_with_mean_1_2_  = this->get_parameter("blend_gate5_with_mean_1_2").as_bool();
         tunnel_blend_gate1_and_2_   = this->get_parameter("tunnel_blend_gate1_and_2").as_bool();
@@ -83,10 +85,20 @@ public:
         // Initialize default gate priors at origin
         initialize_gate_priors();
 
-        // Define Camera Optical (RDF) to Drone Body (FLU) rotation matrix
-        R_cam_to_body_ <<  0.0,  0.0,  1.0,
-                          -1.0,  0.0,  0.0,
-                           0.0, -1.0,  0.0;
+        // Define Camera Optical (RDF) to Drone Body (FLU) rotation matrix with pitch tilt
+        // RDF X (Right) -> Body -Y
+        // RDF Y (Down)  -> Body [sin(pitch), 0, -cos(pitch)]
+        // RDF Z (Fwd)   -> Body [cos(pitch), 0,  sin(pitch)]
+        double pitch_rad = camera_pitch_deg_ * (M_PI / 180.0);
+        R_cam_to_body_ <<  0.0,  std::sin(pitch_rad),  std::cos(pitch_rad),
+                          -1.0,                  0.0,                  0.0,
+                           0.0, -std::cos(pitch_rad),  std::sin(pitch_rad);
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Camera mounting pitch: %.1f deg (RDF to FLU rotation configured).",
+            camera_pitch_deg_
+        );
 
         auto sensor_qos = rclcpp::SensorDataQoS();
 
@@ -461,7 +473,7 @@ private:
 
                 update_gate_kalman(gates_[4], z_meas_blended, best_R_meas, min_mahalanobis_sq);
             } else if (target_idx == 2) {
-                // When targeting Gate 3, preserve the upstream offset from Gate 1/2 and refine along Gate 3's Right-Normal axis
+                // When targeting Gate 3, blend 70% Gate 3 PnP measurement with 30% upstream Gate 1/2 mean offset along Right-Normal axis
                 const Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
                 Eigen::Vector3d r1 = (gates_[0].normal_enu.cross(up_enu)).normalized();
                 Eigen::Vector3d r2 = (gates_[1].normal_enu.cross(up_enu)).normalized();
@@ -477,19 +489,19 @@ private:
                     offset_1_2_applied = delta_right_1_2 * r_mean_1_2;
                 }
 
-                // Base position preserving Gate 1/2 offset
-                Eigen::Vector3d base_pos_gate3 = gates_[2].prior_pos_enu + offset_1_2_applied;
-
-                // Project Gate 3 PnP deviation strictly along Gate 3's Right-Normal axis
+                // Project along Gate 3's Right-Normal axis (r3)
                 Eigen::Vector3d r3 = (gates_[2].normal_enu.cross(up_enu)).normalized();
-                Eigen::Vector3d delta_z3 = best_z_meas - base_pos_gate3;
-
                 Eigen::Vector3d z_meas_gate3;
+
                 if (use_1d_right_axis_offset_) {
-                    double delta_r3 = delta_z3.dot(r3);
-                    z_meas_gate3 = base_pos_gate3 + delta_r3 * r3;
+                    double delta_r12 = offset_1_2_applied.dot(r3);
+                    double delta_r3_pnp = (best_z_meas - gates_[2].prior_pos_enu).dot(r3);
+                    double delta_r3_blended = 0.30 * delta_r12 + 0.70 * delta_r3_pnp;
+                    z_meas_gate3 = gates_[2].prior_pos_enu + delta_r3_blended * r3;
                 } else {
-                    z_meas_gate3 = best_z_meas;
+                    Eigen::Vector3d offset_3_raw = best_z_meas - gates_[2].prior_pos_enu;
+                    Eigen::Vector3d blended_offset = 0.30 * offset_1_2_applied + 0.70 * offset_3_raw;
+                    z_meas_gate3 = gates_[2].prior_pos_enu + blended_offset;
                 }
 
                 update_gate_kalman(gates_[2], z_meas_gate3, best_R_meas, min_mahalanobis_sq);
@@ -725,6 +737,7 @@ private:
     double max_prior_deviation_;
     double max_tilt_rad_;
     double max_refine_dist_;
+    double camera_pitch_deg_{0.0};
     bool publish_initial_pos_;
     bool blend_gate5_with_mean_1_2_{true};
     bool tunnel_blend_gate1_and_2_{true};

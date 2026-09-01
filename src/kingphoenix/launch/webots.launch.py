@@ -33,6 +33,12 @@ def generate_launch_description():
         description='Horizontal field of view in radians (~60 degrees)'
     )
 
+    camera_pitch_deg_arg = DeclareLaunchArgument(
+        'camera_pitch_deg',
+        default_value='15.0',
+        description='Camera mounting pitch angle in degrees (e.g. 15.0 for real drone up-tilt, 0.0 for level sim)'
+    )
+
     camera_node = Node(
         package='webots_camera_front',
         executable='camera_publisher',
@@ -117,6 +123,7 @@ def generate_launch_description():
             'use_1d_right_axis_offset':   True,
             'enable_gate3_pnp_refinement': True,
             'v7':                         True,
+            'camera_pitch_deg':           LaunchConfiguration('camera_pitch_deg'),
         }],
     )
 
@@ -194,6 +201,7 @@ def generate_launch_description():
         server_port_arg,
         frame_id_arg,
         fov_arg,
+        camera_pitch_deg_arg,
         camera_node,
         mavros_node,
         set_message_interval,
