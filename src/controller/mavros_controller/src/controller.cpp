@@ -522,6 +522,18 @@ private:
 
                 // Execute policy step and publish PositionTarget setpoint to /mavros/setpoint_raw/local
                 mavros_msgs::msg::PositionTarget raw_setpoint = policy_.step();
+
+                if (policy_.isAllGatesCleared()) {
+                    RCLCPP_INFO(this->get_logger(), "All gates successfully passed! Automatically transitioning from RUN to HOVER state.");
+                    hover_pose_ = current_pose_;
+                    hover_pose_.header.stamp = this->now();
+                    hover_pose_.header.frame_id = "map";
+                    hover_pose_.pose.position.z = current_pose_.pose.position.z;
+                    current_fsm_state_ = FSMState::HOVER;
+                    local_pos_pub_->publish(hover_pose_);
+                    break;
+                }
+
                 local_raw_pub_->publish(raw_setpoint);
                 break;
             }

@@ -261,7 +261,7 @@ private:
             std::vector<double> sub_offsets;
             if (v7_) {
                 if (state.id == 3) {
-                    sub_offsets = {1.0, 2.0}; // v7: 3 gates total with 1m distance each (0m, 1m, 2m)
+                    sub_offsets = {1.0, 2.5}; // v7: 3 gates total (Gate 3.1 at 1.0m, Gate 3.2 at 2.5m)
                 } else if (state.id == 4) {
                     sub_offsets = {1.0, 2.0, 3.0}; // v7: 4 sub-gates 1m distance each
                 }
@@ -499,11 +499,25 @@ private:
                 if (gates_.size() > 3) {
                     gates_[3].position_enu = gates_[3].prior_pos_enu + total_offset_3;
                 }
+            } else if (target_idx == 1) {
+                // When targeting Gate 2, refine Gate 2 directly using its own PnP measurements (inheriting Gate 1's position as prior)
+                Eigen::Vector3d z_meas_2;
+                if (use_1d_right_axis_offset_) {
+                    const Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
+                    Eigen::Vector3d r2 = (gates_[1].normal_enu.cross(up_enu)).normalized();
+                    Eigen::Vector3d delta_z2 = best_z_meas - gates_[1].prior_pos_enu;
+                    double delta_r2 = delta_z2.dot(r2);
+                    z_meas_2 = gates_[1].prior_pos_enu + delta_r2 * r2;
+                } else {
+                    z_meas_2 = best_z_meas;
+                }
+
+                update_gate_kalman(gates_[1], z_meas_2, best_R_meas, min_mahalanobis_sq);
             } else {
                 update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
             }
 
-            // When Gate 1 or Gate 2 is refined, propagate correction offset to Gate 3, 4, and (optionally) Gate 5
+            // When Gate 1 or Gate 2 is refined, propagate correction offset to downstream gates
             if (target_idx == 0 || target_idx == 1) {
                 Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
                 Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
@@ -537,6 +551,10 @@ private:
                         offset_to_apply = delta_right * r_mean_1_2;
                     }
 
+                    // When Gate 1 is refined, also update Gate 2 position before drone reaches Gate 2
+                    if (target_idx == 0 && gates_.size() > 1) {
+                        gates_[1].position_enu = gates_[1].prior_pos_enu + offset_to_apply;
+                    }
                     if (gates_.size() > 2) {
                         gates_[2].position_enu = gates_[2].prior_pos_enu + offset_to_apply;
                     }

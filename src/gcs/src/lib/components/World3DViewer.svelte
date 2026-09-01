@@ -315,7 +315,7 @@
     scene.add(g2_virtual.group);
     gateGroups.push(g2_virtual);
 
-    // Gate 3: Main (sub 0) + Sub-Gate 3.1 (sub 1, offset 1.0m) + Sub-Gate 3.2 (sub 2, offset 2.0m)
+    // Gate 3: Main (sub 0) + Sub-Gate 3.1 (sub 1, offset 1.0m) + Sub-Gate 3.2 (sub 2, offset 2.5m)
     const g3 = buildGateMesh(3, 0, false, 0.0);
     scene.add(g3.group);
     gateGroups.push(g3);
@@ -324,7 +324,7 @@
     scene.add(g3_sub1.group);
     gateGroups.push(g3_sub1);
 
-    const g3_sub2 = buildGateMesh(3, 2, true, 2.0);
+    const g3_sub2 = buildGateMesh(3, 2, true, 2.5);
     scene.add(g3_sub2.group);
     gateGroups.push(g3_sub2);
 

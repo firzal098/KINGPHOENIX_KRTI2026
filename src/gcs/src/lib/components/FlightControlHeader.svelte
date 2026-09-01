@@ -17,6 +17,44 @@
   let customUrl = '';
   let clickedAction = null;
 
+  // RUN Lap Timer
+  let runElapsedSec = 0;
+  let runTimerInterval = null;
+  let lastFsmState = 'OFF';
+  let runStartTime = null;
+
+  $: handleFsmStateChange($controllerFsmState);
+
+  function handleFsmStateChange(newState) {
+    if (newState === lastFsmState) return;
+
+    if (newState === 'RUN') {
+      // Switching to RUN state: reset previous timer to 0 and start counting
+      runElapsedSec = 0;
+      runStartTime = performance.now();
+      if (runTimerInterval) clearInterval(runTimerInterval);
+      runTimerInterval = setInterval(() => {
+        runElapsedSec = (performance.now() - runStartTime) / 1000.0;
+      }, 50);
+    } else {
+      // Switched out of RUN state: stop timer, DO NOT reset (freeze final lap time)
+      if (runTimerInterval) {
+        clearInterval(runTimerInterval);
+        runTimerInterval = null;
+        if (runStartTime && lastFsmState === 'RUN') {
+          runElapsedSec = (performance.now() - runStartTime) / 1000.0;
+        }
+      }
+    }
+    lastFsmState = newState;
+  }
+
+  function formatTime(seconds) {
+    const mins = Math.floor(seconds / 60);
+    const secs = (seconds % 60).toFixed(2).padStart(5, '0');
+    return `${mins.toString().padStart(2, '0')}:${secs}`;
+  }
+
   $: if ($rosbridgeUrl && !customUrl) {
     customUrl = $rosbridgeUrl;
   }
@@ -123,6 +161,15 @@
       <span class="target-gate-badge font-hud">
         <span class="gate-icon">🎯</span>
         {$targetGateLabel}
+      </span>
+    </div>
+
+    <!-- RUN Lap Timer -->
+    <div class="telemetry-item lap-timer-item">
+      <span class="label">LAP:</span>
+      <span class="lap-timer-badge font-hud {$controllerFsmState === 'RUN' ? 'timer-running' : runElapsedSec > 0 ? 'timer-stopped' : ''}">
+        <span class="timer-icon">⏱️</span>
+        <span class="font-mono timer-value">{formatTime(runElapsedSec)}</span>
       </span>
     </div>
 
@@ -468,6 +515,54 @@
 
   .gate-icon {
     font-size: 0.8rem;
+  }
+
+  /* Lap Timer */
+  .lap-timer-item {
+    margin-left: 2px;
+  }
+
+  .lap-timer-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-secondary);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.74rem;
+    font-weight: 700;
+    border: 1px solid var(--border-subtle);
+    transition: all 0.2s ease;
+  }
+
+  .lap-timer-badge.timer-running {
+    background: rgba(0, 240, 255, 0.15);
+    color: var(--accent-cyan);
+    border-color: rgba(0, 240, 255, 0.5);
+    box-shadow: 0 0 14px rgba(0, 240, 255, 0.35);
+    animation: pulse-timer 1.5s infinite ease-in-out;
+  }
+
+  .lap-timer-badge.timer-stopped {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border-color: rgba(245, 158, 11, 0.4);
+    box-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
+  }
+
+  .timer-icon {
+    font-size: 0.78rem;
+  }
+
+  .timer-value {
+    letter-spacing: 0.05em;
+    font-size: 0.78rem;
+  }
+
+  @keyframes pulse-timer {
+    0%, 100% { box-shadow: 0 0 8px rgba(0, 240, 255, 0.25); }
+    50% { box-shadow: 0 0 16px rgba(0, 240, 255, 0.55); }
   }
 
   .quick-stats {

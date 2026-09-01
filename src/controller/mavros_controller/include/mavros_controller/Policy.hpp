@@ -184,7 +184,7 @@ public:
         if (v7_) {
             if (main_gate_idx == 2) {
                 if (sub_idx == 1) return 1.0;
-                if (sub_idx == 2) return 2.0; // v7: 3 gates total with 1m distance each (0m, 1m, 2m)
+                if (sub_idx == 2) return 2.5; // v7: Gate 3.1 at 1.0m, Gate 3.2 at 2.5m (1.5m spacing from 3.1)
             } else if (main_gate_idx == 3) {
                 // v7: 4 sub gates with 1m distance each (0m, 1m, 2m, 3m)
                 if (sub_idx == 1) return 1.0;
@@ -665,12 +665,12 @@ public:
             prev_action_[1] = std::clamp(raw_vleft,    -8.0,   8.0);
             prev_action_[2] = std::clamp(raw_yaw_rate, -15.707963, 15.707963);
 
-            // When targeting Gate 3, limit horizontal action magnitude [v_fwd, v_left] to 2.0
-            if (current_gate_target_index_ == 2) {
+            // When targeting Gate 3 (idx 2) or Gate 5 (idx 4), limit horizontal action magnitude [v_fwd, v_left] to 2.5
+            if (current_gate_target_index_ == 2 || current_gate_target_index_ == 4) {
                 double mag = std::sqrt(prev_action_[0] * prev_action_[0] + prev_action_[1] * prev_action_[1]);
-                if (mag > 2.0) {
-                    prev_action_[0] = (prev_action_[0] / mag) * 2.0;
-                    prev_action_[1] = (prev_action_[1] / mag) * 2.0;
+                if (mag > 2.5) {
+                    prev_action_[0] = (prev_action_[0] / mag) * 2.5;
+                    prev_action_[1] = (prev_action_[1] / mag) * 2.5;
                 }
             }
         }
@@ -927,6 +927,12 @@ public:
     size_t getTargetSubGateIndex() const { return current_sub_gate_index_; }
     size_t getPreviewGateIndex() const { return current_preview_gate_index_; }
     size_t getPreviewSubGateIndex() const { return current_preview_sub_gate_index_; }
+    bool isAllGatesCleared() const {
+        if (current_gate_poses_.poses.empty()) {
+            return current_gate_target_index_ >= 5;
+        }
+        return current_gate_target_index_ >= current_gate_poses_.poses.size();
+    }
     void setTargetGateIndex(size_t index, size_t sub_index = 0) {
         current_gate_target_index_ = index;
         current_sub_gate_index_ = sub_index;
