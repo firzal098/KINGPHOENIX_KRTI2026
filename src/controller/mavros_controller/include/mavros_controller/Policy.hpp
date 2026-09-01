@@ -164,11 +164,13 @@ public:
     size_t getSubgateCount(size_t main_gate_idx) const
     {
         if (v7_) {
+            if (main_gate_idx == 0) return 2; // Gate 1: 1 main + 1 virtual waypoint (+1.0m before Gate 2)
             if (main_gate_idx == 1) return 2; // Gate 2: 1 main + 1 virtual waypoint (+1.5m fwd, +1.0m right)
             if (main_gate_idx == 2) return 3; // Gate 3: 1 main + 2 sub-gates (total 3 gates)
             if (main_gate_idx == 3) return 4; // Gate 4: 1 main + 3 sub-gates (total 4 gates)
             return 1;
         } else {
+            if (main_gate_idx == 0) return 2; // Gate 1: 1 main + 1 virtual waypoint (+1.0m before Gate 2)
             if (main_gate_idx == 1) return 2; // Gate 2: 1 main + 1 virtual waypoint (+1.5m fwd, +1.0m right)
             if (main_gate_idx == 2) return 2; // Gate 3: 1 main + 1 sub-gate
             if (main_gate_idx == 3) return 3; // Gate 4: 1 main + 2 sub-gates
@@ -222,6 +224,40 @@ public:
             pose.orientation.x = 0.0;
             pose.orientation.y = 0.0;
             pose.orientation.z = 0.0;
+        }
+
+        if (main_gate_idx == 0 && sub_idx == 1) {
+            // Virtual Approach Waypoint: 1.0m before Gate 2 entrance along Gate 2 normal (+1.0*nx)
+            geometry_msgs::msg::Pose gate2_pose;
+            if (!current_gate_poses_.poses.empty() && 1 < current_gate_poses_.poses.size()) {
+                gate2_pose = current_gate_poses_.poses[1];
+            } else {
+                gate2_pose.position.x = default_px + 2.0;
+                gate2_pose.position.y = default_py;
+                gate2_pose.position.z = default_pz;
+                gate2_pose.orientation.w = 1.0;
+                gate2_pose.orientation.x = 0.0;
+                gate2_pose.orientation.y = 0.0;
+                gate2_pose.orientation.z = 0.0;
+            }
+            double gw = gate2_pose.orientation.w;
+            double gx = gate2_pose.orientation.x;
+            double gy = gate2_pose.orientation.y;
+            double gz = gate2_pose.orientation.z;
+            double g_norm = std::sqrt(gw * gw + gx * gx + gy * gy + gz * gz);
+            if (g_norm > 1e-6) {
+                gw /= g_norm; gx /= g_norm; gy /= g_norm; gz /= g_norm;
+            } else {
+                gw = 1.0; gx = 0.0; gy = 0.0; gz = 0.0;
+            }
+            double nx = 1.0 - 2.0 * (gy * gy + gz * gz);
+            double ny = 2.0 * (gx * gy + gw * gz);
+            double nz = 2.0 * (gx * gz - gw * gy);
+
+            gate2_pose.position.x += 1.0 * nx;
+            gate2_pose.position.y += 1.0 * ny;
+            gate2_pose.position.z += 1.0 * nz;
+            return gate2_pose;
         }
 
         if (main_gate_idx == 1 && sub_idx == 1) {
@@ -665,8 +701,8 @@ public:
             prev_action_[1] = std::clamp(raw_vleft,    -8.0,   8.0);
             prev_action_[2] = std::clamp(raw_yaw_rate, -15.707963, 15.707963);
 
-            // When targeting Gate 1 (idx 0), if distance is above 20m, enforce minimum action space magnitude of 10.0
-            if (current_gate_target_index_ == 0) {
+            // When targeting Gate 1 main (idx 0, sub 0), if distance is above 20m, enforce minimum action space magnitude of 10.0
+            if (current_gate_target_index_ == 0 && current_sub_gate_index_ == 0) {
                 double dist_to_gate = std::sqrt(observation_vector_[21] * observation_vector_[21] +
                                                 observation_vector_[22] * observation_vector_[22] +
                                                 observation_vector_[23] * observation_vector_[23]);

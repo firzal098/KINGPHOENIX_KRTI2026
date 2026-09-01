@@ -224,7 +224,9 @@
 
     // Sprite Label above gate
     let labelText = isSubgate ? `GATE #${id}.${subIndex} (SUB)` : `GATE #${id}`;
-    if (id === 2 && subIndex === 1) {
+    if (id === 1 && subIndex === 1) {
+      labelText = 'VIRTUAL APPROACH (+1.0m)';
+    } else if (id === 2 && subIndex === 1) {
       labelText = 'VIRTUAL WP (+1.5m, +1.0m R)';
     } else if (id === 4 && subIndex === 4) {
       labelText = 'VIRTUAL GATE 4 (+6m)';
@@ -301,10 +303,14 @@
     // 8. Gate & Sub-Gate Meshes
     gateGroups = [];
 
-    // Gate 1: Main (sub 0)
+    // Gate 1: Main (sub 0) + Virtual Approach Waypoint (sub 1, 1.0m in front of Gate 2)
     const g1 = buildGateMesh(1, 0, false, 0.0);
     scene.add(g1.group);
     gateGroups.push(g1);
+
+    const g1_virtual = buildGateMesh(1, 1, true, 1.0);
+    scene.add(g1_virtual.group);
+    gateGroups.push(g1_virtual);
 
     // Gate 2: Main (sub 0) + Virtual Waypoint (sub 1, +1.5m fwd, +1.0m right)
     const g2 = buildGateMesh(2, 0, false, 0.0);
@@ -509,7 +515,14 @@
       let offX = offset * Math.cos(base.yaw);
       let offZ = -offset * Math.sin(base.yaw);
 
-      if (gate.mainId === 2 && gate.subIndex === 1) {
+      let currentBase = base;
+      if (gate.mainId === 1 && gate.subIndex === 1) {
+        // Gate 1.1 Virtual Approach Waypoint: 1.0m before Gate 2 entrance (+fwd along Gate 2 normal)
+        currentBase = mainGatePoses[1] || base;
+        const fwdDist = 1.0;
+        offX = fwdDist * Math.cos(currentBase.yaw);
+        offZ = -fwdDist * Math.sin(currentBase.yaw);
+      } else if (gate.mainId === 2 && gate.subIndex === 1) {
         // Gate 2.1 Virtual Waypoint: 1.5m past Gate 2 exit (-fwd), -1.0m right (towards Gate 3 turn)
         const fwdDist = -1.5;
         const rightDist = -1.0;
@@ -517,12 +530,12 @@
         offZ = -fwdDist * Math.sin(base.yaw) + rightDist * Math.cos(base.yaw);
       }
 
-      const posX = base.posX + offX;
-      const posY = base.posY;
-      const posZ = base.posZ + offZ;
+      const posX = currentBase.posX + offX;
+      const posY = currentBase.posY;
+      const posZ = currentBase.posZ + offZ;
 
       gate.group.position.set(posX, posY, posZ);
-      gate.group.rotation.set(0, base.yaw, 0);
+      gate.group.rotation.set(0, currentBase.yaw, 0);
 
       // Highlighting logic matching live controller preview topics:
       let currentPreviewMain = 1;
