@@ -130,6 +130,7 @@ def generate_launch_description():
             #'max_accel': 5.6638,
             'max_accel': 8.5,
             'v7': True,
+            'enable_gate_1_1': True,
         }],
     )
 

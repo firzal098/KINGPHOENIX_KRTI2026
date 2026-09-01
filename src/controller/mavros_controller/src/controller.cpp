@@ -136,10 +136,14 @@ public:
         this->declare_parameter<bool>("v7", false);
         bool v7 = this->get_parameter("v7").as_bool();
 
+        this->declare_parameter<bool>("enable_gate_1_1", true);
+        bool enable_gate_1_1 = this->get_parameter("enable_gate_1_1").as_bool();
+
         policy_.init(this, model_path);
         policy_.setTripleGatePassMethod(triple_gate_pass_method);
         policy_.setMaxAccel(max_accel);
         policy_.setV7(v7);
+        policy_.setEnableGate1_1(enable_gate_1_1);
 
         this->declare_parameter<double>("target_altitude", 1.0);
         target_altitude_ = this->get_parameter("target_altitude").as_double();

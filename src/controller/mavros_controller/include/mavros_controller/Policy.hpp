@@ -53,6 +53,9 @@ public:
         if (node_->has_parameter("max_accel")) {
             a_max_ = node_->get_parameter("max_accel").as_double();
         }
+        if (node_->has_parameter("enable_gate_1_1")) {
+            enable_gate_1_1_ = node_->get_parameter("enable_gate_1_1").as_bool();
+        }
 
         auto qos_reliable = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
         auto qos_best_effort = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
@@ -163,14 +166,13 @@ public:
      */
     size_t getSubgateCount(size_t main_gate_idx) const
     {
+        if (main_gate_idx == 0) return enable_gate_1_1_ ? 2 : 1; // Gate 1: 1 main + optional virtual waypoint (+1.0m before Gate 2)
         if (v7_) {
-            if (main_gate_idx == 0) return 2; // Gate 1: 1 main + 1 virtual waypoint (+1.0m before Gate 2)
             if (main_gate_idx == 1) return 2; // Gate 2: 1 main + 1 virtual waypoint (+1.5m fwd, +1.0m right)
             if (main_gate_idx == 2) return 3; // Gate 3: 1 main + 2 sub-gates (total 3 gates)
             if (main_gate_idx == 3) return 4; // Gate 4: 1 main + 3 sub-gates (total 4 gates)
             return 1;
         } else {
-            if (main_gate_idx == 0) return 2; // Gate 1: 1 main + 1 virtual waypoint (+1.0m before Gate 2)
             if (main_gate_idx == 1) return 2; // Gate 2: 1 main + 1 virtual waypoint (+1.5m fwd, +1.0m right)
             if (main_gate_idx == 2) return 2; // Gate 3: 1 main + 1 sub-gate
             if (main_gate_idx == 3) return 3; // Gate 4: 1 main + 2 sub-gates
@@ -1009,6 +1011,8 @@ public:
     double getMaxAccel() const { return a_max_; }
     void setV7(bool v7) { v7_ = v7; }
     bool getV7() const { return v7_; }
+    void setEnableGate1_1(bool enable) { enable_gate_1_1_ = enable; }
+    bool getEnableGate1_1() const { return enable_gate_1_1_; }
     const std::array<double, 42>& getObservationVector() const { return observation_vector_; }
 
 private:
@@ -1044,6 +1048,7 @@ private:
     int triple_gate_pass_method_{1};
     double a_max_{5.6638};
     bool v7_{false};
+    bool enable_gate_1_1_{true};
 
     double filtered_vx_{0.0};
     double filtered_vy_{0.0};
