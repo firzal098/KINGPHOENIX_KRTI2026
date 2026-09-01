@@ -85,6 +85,11 @@ export const dronePose = writable({
 // Refined 3D Gate Poses from Estimator (Array of { id, x, y, z, qx, qy, qz, qw })
 export const refinedGatePoses = writable([]);
 
+// Real-Time Topic Frequencies (Hz / FPS)
+export const policyActionHz = writable(0);
+export const gateEstimatorHz = writable(0);
+export const cameraFps = writable(0);
+
 export const droneVel = writable({
   vx: 0.0,
   vy: 0.0,
@@ -219,6 +224,23 @@ let ros = null;
 let reconnectTimer = null;
 let imageFrameCount = 0;
 let lastFpsTime = performance.now();
+let actionFrameCount = 0;
+let lastActionFpsTime = performance.now();
+let estimatorFrameCount = 0;
+let lastEstimatorFpsTime = performance.now();
+
+// Reset rate counters to 0 if messages stop arriving
+if (typeof window !== 'undefined') {
+  setInterval(() => {
+    const now = performance.now();
+    if (now - lastActionFpsTime > 2000) policyActionHz.set(0);
+    if (now - lastEstimatorFpsTime > 2000) gateEstimatorHz.set(0);
+    if (now - lastFpsTime > 2000) {
+      cameraFps.set(0);
+      debugImage.update((prev) => ({ ...prev, fps: 0 }));
+    }
+  }, 1000);
+}
 
 function quaternionToEuler(x, y, z, w) {
   // Roll (x-axis rotation)
@@ -488,6 +510,14 @@ function subscribeTopics() {
     messageType: 'geometry_msgs/msg/PoseArray',
   });
   gatePosesSub.subscribe((msg) => {
+    estimatorFrameCount++;
+    const now = performance.now();
+    if (now - lastEstimatorFpsTime >= 1000) {
+      gateEstimatorHz.set(Math.round((estimatorFrameCount * 1000) / (now - lastEstimatorFpsTime)));
+      estimatorFrameCount = 0;
+      lastEstimatorFpsTime = now;
+    }
+
     if (msg && Array.isArray(msg.poses)) {
       refinedGatePoses.set(
         msg.poses.map((p, idx) => ({
@@ -523,6 +553,14 @@ function subscribeTopics() {
     messageType: 'std_msgs/msg/Float64MultiArray',
   });
   actSub.subscribe((msg) => {
+    actionFrameCount++;
+    const now = performance.now();
+    if (now - lastActionFpsTime >= 1000) {
+      policyActionHz.set(Math.round((actionFrameCount * 1000) / (now - lastActionFpsTime)));
+      actionFrameCount = 0;
+      lastActionFpsTime = now;
+    }
+
     if (msg?.data && msg.data.length >= 3) {
       rawAction.set(msg.data);
     }
@@ -554,6 +592,7 @@ export function subscribePerceptionStream() {
     let currentFps = 0;
     if (now - lastFpsTime >= 1000) {
       currentFps = Math.round((imageFrameCount * 1000) / (now - lastFpsTime));
+      cameraFps.set(currentFps);
       imageFrameCount = 0;
       lastFpsTime = now;
     }

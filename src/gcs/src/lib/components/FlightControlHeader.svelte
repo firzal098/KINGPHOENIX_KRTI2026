@@ -8,6 +8,9 @@
     fcuState,
     dronePose,
     droneVel,
+    policyActionHz,
+    gateEstimatorHz,
+    cameraFps,
     callChangeState,
     initRosConnection,
     serviceResponseLog
@@ -182,6 +185,25 @@
       <div class="stat-box">
         <span class="stat-lbl">SPEED</span>
         <span class="stat-val font-mono">{$droneVel.speed.toFixed(2)} <small>m/s</small></span>
+      </div>
+    </div>
+
+    <!-- Real-Time Stream Rates (Hz / FPS) -->
+    <div class="hz-stats" title="Real-Time Topic Rates (Policy / Estimator / Camera)">
+      <div class="hz-item" title="Policy Action Rate (/policy/action)">
+        <span class="hz-dot {$policyActionHz > 0 ? 'dot-cyan' : 'dot-off'}"></span>
+        <span class="hz-label">POLICY:</span>
+        <span class="hz-val font-mono">{$policyActionHz}<small>Hz</small></span>
+      </div>
+      <div class="hz-item" title="Gate Estimator Rate (/estimator/refined_gate_poses)">
+        <span class="hz-dot {$gateEstimatorHz > 0 ? 'dot-emerald' : 'dot-off'}"></span>
+        <span class="hz-label">EST:</span>
+        <span class="hz-val font-mono">{$gateEstimatorHz}<small>Hz</small></span>
+      </div>
+      <div class="hz-item" title="Camera / Perception Stream FPS">
+        <span class="hz-dot {$cameraFps > 0 ? 'dot-purple' : 'dot-off'}"></span>
+        <span class="hz-label">CAM:</span>
+        <span class="hz-val font-mono">{$cameraFps}<small>FPS</small></span>
       </div>
     </div>
   </div>
@@ -593,6 +615,69 @@
   .stat-val small {
     font-size: 0.65rem;
     color: var(--text-secondary);
+  }
+
+  /* Real-Time Hz Stats */
+  .hz-stats {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border-left: 1px solid var(--border-subtle);
+    padding-left: 10px;
+  }
+
+  .hz-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 0.7rem;
+  }
+
+  .hz-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+  }
+
+  .dot-cyan {
+    background: var(--accent-cyan, #00f0ff);
+    box-shadow: 0 0 6px rgba(0, 240, 255, 0.7);
+  }
+
+  .dot-emerald {
+    background: var(--accent-green, #10b981);
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.7);
+  }
+
+  .dot-purple {
+    background: var(--accent-purple, #a855f7);
+    box-shadow: 0 0 6px rgba(168, 85, 247, 0.7);
+  }
+
+  .dot-off {
+    background: #475569;
+  }
+
+  .hz-label {
+    font-size: 0.62rem;
+    font-weight: 700;
+    color: var(--text-muted);
+  }
+
+  .hz-val {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+
+  .hz-val small {
+    font-size: 0.6rem;
+    color: var(--text-muted);
+    margin-left: 1px;
   }
 
   /* Actions */

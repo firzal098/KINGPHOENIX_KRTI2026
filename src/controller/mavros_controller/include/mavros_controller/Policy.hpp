@@ -665,12 +665,40 @@ public:
             prev_action_[1] = std::clamp(raw_vleft,    -8.0,   8.0);
             prev_action_[2] = std::clamp(raw_yaw_rate, -15.707963, 15.707963);
 
-            // When targeting Gate 3 (idx 2) or Gate 5 (idx 4), limit horizontal action magnitude [v_fwd, v_left] to 2.5
-            if (current_gate_target_index_ == 2 || current_gate_target_index_ == 4) {
+            // When targeting Gate 1 (idx 0), if distance is above 20m, enforce minimum action space magnitude of 10.0
+            if (current_gate_target_index_ == 0) {
+                double dist_to_gate = std::sqrt(observation_vector_[21] * observation_vector_[21] +
+                                                observation_vector_[22] * observation_vector_[22] +
+                                                observation_vector_[23] * observation_vector_[23]);
+                if (dist_to_gate > 20.0) {
+                    double mag = std::sqrt(prev_action_[0] * prev_action_[0] + prev_action_[1] * prev_action_[1]);
+                    if (mag < 10.0) {
+                        if (mag > 1e-4) {
+                            prev_action_[0] = (prev_action_[0] / mag) * 10.0;
+                            prev_action_[1] = (prev_action_[1] / mag) * 10.0;
+                        } else {
+                            prev_action_[0] = 10.0;
+                            prev_action_[1] = 0.0;
+                        }
+                    }
+                }
+            }
+
+            // When targeting Gate 3 (idx 2), limit horizontal action magnitude [v_fwd, v_left] to 2.0
+            if (current_gate_target_index_ == 2) {
                 double mag = std::sqrt(prev_action_[0] * prev_action_[0] + prev_action_[1] * prev_action_[1]);
-                if (mag > 2.5) {
-                    prev_action_[0] = (prev_action_[0] / mag) * 2.5;
-                    prev_action_[1] = (prev_action_[1] / mag) * 2.5;
+                if (mag > 2.0) {
+                    prev_action_[0] = (prev_action_[0] / mag) * 2.0;
+                    prev_action_[1] = (prev_action_[1] / mag) * 2.0;
+                }
+            }
+
+            // When targeting Gate 5 (idx 4), limit horizontal action magnitude [v_fwd, v_left] to 4.0
+            if (current_gate_target_index_ == 4) {
+                double mag = std::sqrt(prev_action_[0] * prev_action_[0] + prev_action_[1] * prev_action_[1]);
+                if (mag > 4.0) {
+                    prev_action_[0] = (prev_action_[0] / mag) * 4.0;
+                    prev_action_[1] = (prev_action_[1] / mag) * 4.0;
                 }
             }
         }

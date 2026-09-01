@@ -1,5 +1,5 @@
 <script>
-  import { structuredAction, rawAction } from '../ros.js';
+  import { structuredAction, rawAction, policyActionHz } from '../ros.js';
 
   function fmt(val, dec = 2) {
     if (val === undefined || isNaN(val)) return '0.00';
@@ -29,7 +29,12 @@
       </span>
       <span class="font-hud">POLICY ACTION SPACE (3D)</span>
     </div>
-    <span class="topic-tag font-mono">/policy/action</span>
+    <span class="topic-tag font-mono">
+      /policy/action
+      {#if $policyActionHz > 0}
+        <span class="hz-tag">{$policyActionHz} Hz</span>
+      {/if}
+    </span>
   </div>
 
   <div class="actions-grid">
@@ -180,6 +185,17 @@
     background: rgba(255, 255, 255, 0.04);
     padding: 2px 6px;
     border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .hz-tag {
+    color: var(--accent-cyan, #00f0ff);
+    font-weight: 700;
+    background: rgba(0, 240, 255, 0.1);
+    padding: 1px 4px;
+    border-radius: 3px;
   }
 
   .actions-grid {
