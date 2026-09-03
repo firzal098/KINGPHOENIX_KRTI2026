@@ -473,36 +473,22 @@ private:
 
                 update_gate_kalman(gates_[4], z_meas_blended, best_R_meas, min_mahalanobis_sq);
             } else if (target_idx == 2) {
-                // When targeting Gate 3, blend 70% Gate 3 PnP measurement with 30% upstream Gate 1/2 mean offset along Right-Normal axis
-                const Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
-                Eigen::Vector3d r1 = (gates_[0].normal_enu.cross(up_enu)).normalized();
-                Eigen::Vector3d r2 = (gates_[1].normal_enu.cross(up_enu)).normalized();
-                Eigen::Vector3d r_mean_1_2 = (tunnel_blend_gate1_and_2_ ? (r1 + r2) : r2).normalized();
-
+                // When targeting Gate 3, blend 50% Gate 3 PnP measurement with 50% upstream Gate 1/2 mean offset across full horizontal plane (X and Y)
                 Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
                 Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
                 Eigen::Vector3d raw_offset_1_2 = tunnel_blend_gate1_and_2_ ? (0.5 * (offset_1 + offset_2)) : offset_2;
 
-                Eigen::Vector3d offset_1_2_applied = raw_offset_1_2;
-                if (use_1d_right_axis_offset_) {
-                    double delta_right_1_2 = raw_offset_1_2.dot(r_mean_1_2);
-                    offset_1_2_applied = delta_right_1_2 * r_mean_1_2;
-                }
+                // 2D Full Horizontal Offset (X, Y) from Gate 1 and 2
+                Eigen::Vector3d offset_1_2_horiz(raw_offset_1_2.x(), raw_offset_1_2.y(), 0.0);
 
-                // Project along Gate 3's Right-Normal axis (r3)
-                Eigen::Vector3d r3 = (gates_[2].normal_enu.cross(up_enu)).normalized();
-                Eigen::Vector3d z_meas_gate3;
+                // 2D Full Horizontal Offset (X, Y) from Gate 3 PnP
+                Eigen::Vector3d offset_3_pnp_raw = best_z_meas - gates_[2].prior_pos_enu;
+                Eigen::Vector3d offset_3_pnp_horiz(offset_3_pnp_raw.x(), offset_3_pnp_raw.y(), 0.0);
 
-                if (use_1d_right_axis_offset_) {
-                    double delta_r12 = offset_1_2_applied.dot(r3);
-                    double delta_r3_pnp = (best_z_meas - gates_[2].prior_pos_enu).dot(r3);
-                    double delta_r3_blended = 0.30 * delta_r12 + 0.70 * delta_r3_pnp;
-                    z_meas_gate3 = gates_[2].prior_pos_enu + delta_r3_blended * r3;
-                } else {
-                    Eigen::Vector3d offset_3_raw = best_z_meas - gates_[2].prior_pos_enu;
-                    Eigen::Vector3d blended_offset = 0.30 * offset_1_2_applied + 0.70 * offset_3_raw;
-                    z_meas_gate3 = gates_[2].prior_pos_enu + blended_offset;
-                }
+                // 50% Gate 1/2 horizontal shift + 50% Gate 3 PnP horizontal shift
+                Eigen::Vector3d blended_horiz = 0.50 * offset_1_2_horiz + 0.50 * offset_3_pnp_horiz;
+                Eigen::Vector3d z_meas_gate3 = gates_[2].prior_pos_enu + blended_horiz;
+                z_meas_gate3.z() = best_z_meas.z(); // Keep vertical height from PnP
 
                 update_gate_kalman(gates_[2], z_meas_gate3, best_R_meas, min_mahalanobis_sq);
 
@@ -529,7 +515,7 @@ private:
                 update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
             }
 
-            // When Gate 1 or Gate 2 is refined, propagate correction offset to downstream gates
+            // When Gate 1 or Gate 2 is refined, propagate full 2D horizontal correction offset to downstream gates
             if (target_idx == 0 || target_idx == 1) {
                 Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
                 Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
@@ -550,18 +536,8 @@ private:
                 }
 
                 if (should_propagate) {
-                    Eigen::Vector3d offset_to_apply = raw_offset;
-                    if (use_1d_right_axis_offset_) {
-                        // Compute World-Space Mean Right-Normal Vector of Gate 1 and 2
-                        const Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
-                        Eigen::Vector3d r1 = (gates_[0].normal_enu.cross(up_enu)).normalized();
-                        Eigen::Vector3d r2 = (gates_[1].normal_enu.cross(up_enu)).normalized();
-                        Eigen::Vector3d r_mean_1_2 = (tunnel_blend_gate1_and_2_ ? (r1 + r2) : r2).normalized();
-
-                        // 1D Scalar projection along World Right Axis
-                        double delta_right = raw_offset.dot(r_mean_1_2);
-                        offset_to_apply = delta_right * r_mean_1_2;
-                    }
+                    // Apply full 2D horizontal plane offset (X and Y)
+                    Eigen::Vector3d offset_to_apply(raw_offset.x(), raw_offset.y(), 0.0);
 
                     // When Gate 1 is refined, also update Gate 2 position before drone reaches Gate 2
                     if (target_idx == 0 && gates_.size() > 1) {

@@ -35,7 +35,7 @@ def generate_launch_description():
 
     camera_pitch_deg_arg = DeclareLaunchArgument(
         'camera_pitch_deg',
-        default_value='15.0',
+        default_value='0.0',
         description='Camera mounting pitch angle in degrees (e.g. 15.0 for real drone up-tilt, 0.0 for level sim)'
     )
 
