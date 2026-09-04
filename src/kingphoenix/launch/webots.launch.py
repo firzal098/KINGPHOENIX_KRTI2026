@@ -36,7 +36,7 @@ def generate_launch_description():
 
     camera_pitch_deg_arg = DeclareLaunchArgument(
         'camera_pitch_deg',
-        default_value='15.0',
+        default_value='10.0',
         description='Camera mounting pitch angle in degrees (e.g. 15.0 for real drone up-tilt, 0.0 for level sim)'
     )
 
@@ -129,6 +129,8 @@ def generate_launch_description():
             'corner_conf_threshold': 0.15,
             'gate_width_m': 1.9,
             'gate_height_m': 2.0,
+            'camera_pitch_deg': LaunchConfiguration('camera_pitch_deg'),
+            'prior_source': 'defined_constants',
             'publish_pnp_fallback': True,
         }],
     )
@@ -147,6 +149,7 @@ def generate_launch_description():
             'process_noise_q': 1e-4,
             'p0_sigma': 2.0,
             'camera_pitch_deg': LaunchConfiguration('camera_pitch_deg'),
+            'anchor_priors_at_takeoff': True,
             'cond_h_max': 1000.0,
             'max_innovation_px_sanity': 120.0,
             'max_refine_distance_m': 36.0,

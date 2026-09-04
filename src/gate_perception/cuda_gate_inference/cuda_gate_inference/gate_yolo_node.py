@@ -17,6 +17,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from ament_index_python.packages import get_package_share_directory
 
+from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import Image, CompressedImage, CameraInfo
 from geometry_msgs.msg import PolygonStamped, Point32, PoseArray, PoseStamped, Pose
 from std_msgs.msg import Float64MultiArray, Int32
@@ -208,15 +209,23 @@ class GateYoloNode(Node):
         self.last_projected_corners_time = self.get_clock().now()
         self.last_target_det_center = None
 
-        # Direct prior projection fallback parameters & subscriptions (works without gate_estimator_node)
+        # Direct prior projection parameters & subscriptions
         self.declare_parameter('camera_pitch_deg', 15.0)
         self.declare_parameter('prior_source', 'defined_constants')
+        self.declare_parameter('show_all_projected_gates', True)
         self.camera_pitch_deg = float(self.get_parameter('camera_pitch_deg').value)
         self.prior_source = str(self.get_parameter('prior_source').value).lower()
+        self.show_all_projected_gates = bool(self.get_parameter('show_all_projected_gates').value)
 
-        self.drone_pos_w = None
-        self.drone_quat_w = None
-        self.R_wb = None
+        # Dynamic parameter reconfiguration callback
+        self.add_on_set_parameters_callback(self.parameters_callback)
+
+        self.drone_pos_w = np.zeros(3, dtype=np.float64)
+        self.drone_quat_w = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        self.R_wb = np.eye(3, dtype=np.float64)
+        self.initial_drone_pos = np.zeros(3, dtype=np.float64)
+        self.initial_drone_rot = np.eye(3, dtype=np.float64)
+        self.initial_pose_captured = False
         self.active_target_gate_idx = 0
 
         self.sub_drone_pose = self.create_subscription(
@@ -228,12 +237,172 @@ class GateYoloNode(Node):
 
         self.get_logger().info(f"Gate YOLO Node initialized using ONNX model: {self.model_path}")
 
+    @staticmethod
+    def _extract_param_value(param):
+        val = getattr(param, 'value', None)
+        if hasattr(val, 'type') and hasattr(val, 'double_value'):
+            if val.type == 3:
+                return val.double_value
+            elif val.type == 2:
+                return val.integer_value
+            elif val.type == 4:
+                return val.string_value
+            elif val.type == 1:
+                return val.bool_value
+        return val
+
+    def parameters_callback(self, params):
+        for param in params:
+            val = self._extract_param_value(param)
+            if val is None:
+                continue
+            if param.name == 'camera_pitch_deg':
+                self.camera_pitch_deg = float(val)
+                self.get_logger().info(f"Dynamic param update: camera_pitch_deg = {self.camera_pitch_deg:.1f}°")
+            elif param.name == 'conf_threshold':
+                self.conf_threshold = float(val)
+                self.get_logger().info(f"Dynamic param update: conf_threshold = {self.conf_threshold:.2f}")
+            elif param.name == 'corner_conf_threshold':
+                self.corner_conf_thresh = float(val)
+                self.get_logger().info(f"Dynamic param update: corner_conf_threshold = {self.corner_conf_thresh:.2f}")
+            elif param.name == 'prior_source':
+                self.prior_source = str(val).lower()
+                self.get_logger().info(f"Dynamic param update: prior_source = {self.prior_source}")
+            elif param.name == 'show_all_projected_gates':
+                self.show_all_projected_gates = bool(val)
+                self.get_logger().info(f"Dynamic param update: show_all_projected_gates = {self.show_all_projected_gates}")
+        return SetParametersResult(successful=True)
+
+    def get_gate_list(self):
+        """Returns list of (gate_id, pos_enu, yaw_rad) for all surveyed gates anchored to takeoff pose."""
+        if self.prior_source == 'webots_world':
+            return [(gid, np.array([x, y, z], dtype=np.float64), yaw) for gid, x, y, z, yaw in WEBOTS_GATES]
+        else:
+            # Priors in RDF relative to drone takeoff pose: [x_right, y_down, z_fwd], normal: [nx, ny, nz]
+            priors_rdf = [
+                (1,  0.41, -0.75, 29.33,  0.0, 0.0, 1.0),
+                (2,  5.46, -0.75, 19.31,  0.0, 0.0, 1.0),
+                (3,  9.49, -0.75, 10.51,  1.0, 0.0, 0.0),
+                (4, 12.41, -0.75, 12.43,  0.0, 0.0, 1.0),
+                (5, 17.47, -0.75, 29.38,  0.0, 0.0, 1.0)
+            ]
+            gates = []
+            for gid, x_rdf, y_rdf, z_rdf, nx_rdf, ny_rdf, nz_rdf in priors_rdf:
+                rel_pos_enu = np.array([z_rdf, -x_rdf, -y_rdf], dtype=np.float64)
+                rel_norm_enu = np.array([nz_rdf, -nx_rdf, -ny_rdf], dtype=np.float64)
+
+                pos_enu = self.initial_drone_pos + self.initial_drone_rot @ rel_pos_enu
+                norm_enu = self.initial_drone_rot @ rel_norm_enu
+                norm_enu /= max(1e-6, np.linalg.norm(norm_enu))
+
+                yaw_rad = math.atan2(norm_enu[1], norm_enu[0])
+                gates.append((gid, pos_enu, yaw_rad))
+            return gates
+
+    def compute_gate_corners_world(self, center_enu, yaw_rad):
+        """Constructs 4 outer corners in World ENU frame: [TL, TR, BR, BL]."""
+        hw = self.gate_w / 2.0
+        hh = self.gate_h / 2.0
+        u_lat = np.array([-math.sin(yaw_rad), math.cos(yaw_rad), 0.0], dtype=np.float64)
+        u_vert = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        c_tl = center_enu + hw * u_lat + hh * u_vert
+        c_tr = center_enu - hw * u_lat + hh * u_vert
+        c_br = center_enu - hw * u_lat - hh * u_vert
+        c_bl = center_enu + hw * u_lat - hh * u_vert
+        return [c_tl, c_tr, c_br, c_bl]
+
+    def project_corner(self, corner_enu, R_bc, K, drone_pos, R_wb):
+        """Transforms corner ENU -> camera RDF -> 2D pixel (u, v)."""
+        p_c = world_to_camera_rdf(corner_enu, drone_pos, R_wb, R_bc)
+        if p_c[2] < 0.2:
+            return None, float(p_c[2])
+        fx = K[0, 0]
+        fy = K[1, 1]
+        cx = K[0, 2]
+        cy = K[1, 2]
+        u = fx * (p_c[0] / p_c[2]) + cx
+        v = fy * (p_c[1] / p_c[2]) + cy
+        return (float(u), float(v)), float(p_c[2])
+
+    def get_projected_gates(self, img_w=640, img_h=640):
+        """
+        Projects all known gates into camera pixel space using current drone pose and intrinsics.
+        Returns dict: {gate_id: {'corners': np.ndarray (4, 2), 'center': (cx, cy), 'bbox': (cx, cy, w, h), 'dist': float, 'depth': float, 'yaw': float}}
+        """
+        if self.camera_matrix is not None:
+            K = self.camera_matrix
+        else:
+            fov = 1.03
+            cx = img_w / 2.0
+            cy = img_h / 2.0
+            fx = cx / math.tan(fov / 2.0)
+            fy = fx
+            K = np.array([
+                [fx, 0.0, cx],
+                [0.0, fy, cy],
+                [0.0, 0.0, 1.0]
+            ], dtype=np.float64)
+
+        drone_pos = self.drone_pos_w if self.drone_pos_w is not None else np.zeros(3, dtype=np.float64)
+        R_wb = self.R_wb if self.R_wb is not None else np.eye(3, dtype=np.float64)
+        R_bc = get_camera_to_body_rotation(self.camera_pitch_deg)
+        gates = self.get_gate_list()
+
+        projected = {}
+        for gid, pos_enu, yaw_rad in gates:
+            dist = float(np.linalg.norm(pos_enu - drone_pos))
+            corners_w = self.compute_gate_corners_world(pos_enu, yaw_rad)
+
+            corners_2d = []
+            depths = []
+            all_valid = True
+            for c_w in corners_w:
+                px, depth = self.project_corner(c_w, R_bc, K, drone_pos, R_wb)
+                depths.append(depth)
+                if px is None:
+                    all_valid = False
+                    break
+                corners_2d.append(px)
+
+            if not all_valid:
+                continue
+
+            corners_arr = np.array(corners_2d, dtype=np.float32)  # (4, 2) [TL, TR, BR, BL]
+            min_u, max_u = np.min(corners_arr[:, 0]), np.max(corners_arr[:, 0])
+            min_v, max_v = np.min(corners_arr[:, 1]), np.max(corners_arr[:, 1])
+            cx = float(np.mean(corners_arr[:, 0]))
+            cy = float(np.mean(corners_arr[:, 1]))
+            w = float(max_u - min_u)
+            h = float(max_v - min_v)
+
+            # Keep if inside or near viewport (-400 to +1040)
+            if -400 <= cx <= 1040 and -400 <= cy <= 1040:
+                projected[gid] = {
+                    'corners': corners_arr,
+                    'center': (cx, cy),
+                    'bbox': (cx, cy, w, h),
+                    'dist': dist,
+                    'depth': float(np.mean(depths)),
+                    'yaw': yaw_rad
+                }
+
+        return projected
+
     def drone_pose_callback(self, msg: PoseStamped):
         p = msg.pose.position
         o = msg.pose.orientation
         self.drone_pos_w = np.array([p.x, p.y, p.z], dtype=np.float64)
         self.drone_quat_w = np.array([o.w, o.x, o.y, o.z], dtype=np.float64)
         self.R_wb = quat_to_rot_matrix(self.drone_quat_w)
+
+        if not self.initial_pose_captured:
+            self.initial_drone_pos = self.drone_pos_w.copy()
+            self.initial_drone_rot = self.R_wb.copy()
+            self.initial_pose_captured = True
+            self.get_logger().info(
+                f"Captured initial takeoff pose offset: [{self.initial_drone_pos[0]:.2f}, "
+                f"{self.initial_drone_pos[1]:.2f}, {self.initial_drone_pos[2]:.2f}]. Anchoring gate priors."
+            )
 
     def target_gate_callback(self, msg: Int32):
         if msg.data >= 0:
@@ -271,10 +440,14 @@ class GateYoloNode(Node):
             self.ort_session = None
 
     def camera_info_callback(self, msg: CameraInfo):
-        if self.camera_matrix is None:
-            self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape((3, 3))
-            self.dist_coeffs = np.array(msg.d, dtype=np.float64) if len(msg.d) > 0 else np.zeros((5, 1))
-            self.get_logger().info(f"Camera intrinsics registered: fx={self.camera_matrix[0,0]:.2f}, fy={self.camera_matrix[1,1]:.2f}")
+        first_time = (self.camera_matrix is None)
+        self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape((3, 3))
+        self.dist_coeffs = np.array(msg.d, dtype=np.float64) if len(msg.d) > 0 else np.zeros((5, 1))
+        if first_time:
+            self.get_logger().info(
+                f"Camera intrinsics registered: fx={self.camera_matrix[0,0]:.2f}, fy={self.camera_matrix[1,1]:.2f}, "
+                f"cx={self.camera_matrix[0,2]:.1f}, cy={self.camera_matrix[1,2]:.1f}"
+            )
 
     def image_callback(self, msg: Image):
         if self.ort_session is None:
@@ -349,43 +522,73 @@ class GateYoloNode(Node):
                     'pose_3d': None
                 })
 
-        # 1. Associate and publish 2D Corner Keypoints (PolygonStamped)
-        best_det = None
-        if len(detections) > 0:
-            if self.latest_projected_corners is not None:
-                ekf_px = self.latest_projected_corners['ekf_pixels']
-                target_u = float(np.mean(ekf_px[:, 0]))
-                target_v = float(np.mean(ekf_px[:, 1]))
-                proj_w = float(np.max(ekf_px[:, 0]) - np.min(ekf_px[:, 0]))
+        # 1. Project all visible gate priors into current camera pixel frame
+        projected_priors = self.get_projected_gates(orig_w, orig_h)
+        target_gate_id = self.active_target_gate_idx + 1
 
-                def assoc_cost(d):
-                    cx, cy, w, h = d['bbox']
-                    # Horizontal error is primary (yaw/lateral track alignment)
-                    u_err = abs(cx - target_u)
-                    # Vertical error (altitude/pitch alignment)
-                    v_err = abs(cy - target_v)
-                    # Gate width/scale error (distance to gate cue)
-                    w_err = abs(w - proj_w)
+        self.get_logger().info(
+            f"PERCEPTION DIAG: projected_priors={list(projected_priors.keys())}, "
+            f"target_gate_id={target_gate_id}, "
+            f"drone_pos={self.drone_pos_w.tolist() if self.drone_pos_w is not None else None}, "
+            f"camera_pitch={self.camera_pitch_deg:.1f}°",
+            throttle_duration_sec=2.0
+        )
 
-                    cost = u_err + 0.4 * v_err + 1.2 * w_err
+        # 2. Prior-guided Association: match each YOLO detection to closest projected gate prior
 
-                    # Temporal tracking hysteresis: strongly prefer continuing to track same gate
-                    if self.last_target_det_center is not None:
-                        prev_dist = math.hypot(cx - self.last_target_det_center[0],
-                                               cy - self.last_target_det_center[1])
-                        if prev_dist < 80.0:
-                            cost -= 60.0
+        for det in detections:
+            det['assigned_gate_id'] = None
+            det['assoc_cost'] = float('inf')
 
-                    return cost
+            cx_det, cy_det, w_det, h_det = det['bbox']
 
-                best_det = min(detections, key=assoc_cost)
-                self.last_target_det_center = (best_det['bbox'][0], best_det['bbox'][1])
-            else:
-                best_det = max(detections, key=lambda d: d['score'])
-                self.last_target_det_center = (best_det['bbox'][0], best_det['bbox'][1])
+            best_gid = None
+            best_cost = float('inf')
 
+            for gid, p_info in projected_priors.items():
+                cx_p, cy_p = p_info['center']
+                w_p, h_p = p_info['bbox'][2], p_info['bbox'][3]
+
+                u_diff = abs(cx_det - cx_p)
+                v_diff = abs(cy_det - cy_p)
+                dist_2d = math.hypot(u_diff, v_diff)
+
+                # Scale consistency: ratio between detected width and projected prior width
+                scale_ratio = min(w_det, max(1.0, w_p)) / max(w_det, max(1.0, w_p))
+
+                # Weight 2D center distance + scale penalty
+                cost = dist_2d + 50.0 * (1.0 - scale_ratio)
+
+                # Association gate: allow up to 250 pixels deviation (absorbs ground pitch differences)
+                if dist_2d < 250.0 and cost < best_cost:
+                    best_cost = cost
+                    best_gid = gid
+
+            if best_gid is not None:
+                det['assigned_gate_id'] = best_gid
+                det['assoc_cost'] = best_cost
+
+        # 3. Find detection explicitly matched to the active target gate
+        target_det = None
+        for det in detections:
+            if det.get('assigned_gate_id') == target_gate_id:
+                if target_det is None or det['score'] > target_det['score']:
+                    target_det = det
+
+        # Fallback association: if active target gate not assigned but only 1 detection exists and target prior is in view
+        if target_det is None and len(detections) == 1 and target_gate_id in projected_priors:
+            p_target = projected_priors[target_gate_id]
+            cx_det, cy_det = detections[0]['bbox'][0], detections[0]['bbox'][1]
+            dist_2d = math.hypot(cx_det - p_target['center'][0], cy_det - p_target['center'][1])
+            if dist_2d < 300.0:
+                target_det = detections[0]
+                target_det['assigned_gate_id'] = target_gate_id
+
+        # 4. Publish 2D Corner Keypoints ONLY if target gate is matched
+        if target_det is not None:
             poly_msg = PolygonStamped()
             poly_msg.header = msg.header
+            poly_msg.header.frame_id = f"gate_{target_gate_id}"
             # 4 Points in canonical order: TL, TR, BR, BL
             # YOLO model keypoint mapping:
             # Index 7: Top-Left (TL)
@@ -395,13 +598,14 @@ class GateYoloNode(Node):
             corner_indices = [7, 8, 9, 6]
             for k_idx in corner_indices:
                 pt = Point32()
-                pt.x = float(best_det['kp_x'][k_idx])
-                pt.y = float(best_det['kp_y'][k_idx])
-                pt.z = float(best_det['kp_vis'][k_idx])
+                pt.x = float(target_det['kp_x'][k_idx])
+                pt.y = float(target_det['kp_y'][k_idx])
+                pt.z = float(target_det['kp_vis'][k_idx])
                 poly_msg.polygon.points.append(pt)
             self.pub_corners_2d.publish(poly_msg)
+            self.last_target_det_center = (target_det['bbox'][0], target_det['bbox'][1])
 
-        # 2. Fallback PnP solving (if enabled and requested by legacy nodes)
+        # Fallback PnP solving (if enabled and requested by legacy nodes)
         if self.publish_pnp_fallback and self.camera_matrix is not None:
             pose_3d_msg = PoseArray()
             pose_3d_msg.header = msg.header
@@ -455,109 +659,159 @@ class GateYoloNode(Node):
                 p_msg.pose = best_pose
                 self.pub_primary_pose.publish(p_msg)
 
-        # 3. Debug Overlays (Publish continuously for GCS and ROS tools)
+        # 5. Rich Debug Overlays (Always streaming)
         if self.publish_debug:
-            self.publish_debug_overlay(frame, detections, best_det, msg.header, publish_raw=True, publish_compressed=True)
+            self.publish_debug_overlay(frame, detections, target_det, projected_priors, target_gate_id, msg.header, publish_raw=True, publish_compressed=True)
 
-    def publish_debug_overlay(self, frame, detections, best_det, header, publish_raw=True, publish_compressed=True):
+    def publish_debug_overlay(self, frame, detections, target_det, projected_priors, target_gate_id, header, publish_raw=True, publish_compressed=True):
         vis_img = frame.copy()
 
-        # 1. Draw YOLO Bounding Boxes and Detected Keypoints
+        gate_palette = [
+            (255, 255, 0),   # G1: Cyan (B=255, G=255, R=0)
+            (0, 200, 255),   # G2: Orange
+            (255, 0, 255),   # G3: Magenta
+            (0, 255, 128),   # G4: Spring Green
+            (180, 105, 255)  # G5: Hot Pink
+        ]
+        corner_colors = [
+            (255, 100, 0),   # TL - Sky Blue
+            (0, 255, 0),     # TR - Bright Green
+            (0, 0, 255),     # BR - Bright Red
+            (0, 255, 255)    # BL - Bright Yellow
+        ]
+        corner_names = ["TL", "TR", "BR", "BL"]
+
+        # 1. Render all visible projected gate priors (from test_gate_projection)
+        for gid, p_info in projected_priors.items():
+            is_target = (gid == target_gate_id)
+            if not self.show_all_projected_gates and not is_target:
+                continue
+
+            pts = np.clip(p_info['corners'], -2000, 4000).astype(np.int32)
+            gate_col = gate_palette[(gid - 1) % len(gate_palette)]
+            line_thickness = 3 if is_target else 2
+
+            # Draw polygon
+            cv2.polylines(vis_img, [pts], isClosed=True, color=gate_col, thickness=line_thickness)
+
+            # Draw corners
+            for c_idx, pt in enumerate(pts):
+                c_col = corner_colors[c_idx]
+                cv2.circle(vis_img, (int(pt[0]), int(pt[1])), 5, c_col, -1)
+                cv2.circle(vis_img, (int(pt[0]), int(pt[1])), 7, (0, 0, 0), 1)
+                offset_x = -18 if c_idx in [0, 3] else 6
+                offset_y = -8 if c_idx in [0, 1] else 16
+                cv2.putText(vis_img, corner_names[c_idx],
+                            (int(pt[0]) + offset_x, int(pt[1]) + offset_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, c_col, 1, cv2.LINE_AA)
+
+            # Center crosshair & label
+            cx_i, cy_i = int(p_info['center'][0]), int(p_info['center'][1])
+            cv2.drawMarker(vis_img, (cx_i, cy_i), gate_col, cv2.MARKER_CROSS, 12, 2)
+            dist_val = p_info['dist']
+            tag = f"[TARGET G{gid}] {dist_val:.1f}m" if is_target else f"Prior G{gid}: {dist_val:.1f}m"
+            cv2.putText(vis_img, tag, (int(pts[0, 0]), int(max(20, pts[0, 1] - 10))),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, gate_col, 2, cv2.LINE_AA)
+
+        # 2. Draw YOLO Bounding Boxes & Assigned Labels
         for det in detections:
             cx, cy, w, h = det['bbox']
             x1, y1 = int(cx - w / 2), int(cy - h / 2)
             x2, y2 = int(cx + w / 2), int(cy + h / 2)
 
-            is_target = (det is best_det)
-            box_col = (0, 255, 0) if is_target else (160, 160, 160)
-            tag = "Target Gate" if is_target else "Gate"
-            cv2.rectangle(vis_img, (x1, y1), (x2, y2), box_col, 2)
-            cv2.putText(vis_img, f"{tag}: {det['score']:.2f}", (x1, max(15, y1 - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_col, 2)
+            assigned_gid = det.get('assigned_gate_id', None)
+            is_target = (det is target_det)
 
+            if is_target:
+                box_col = (0, 255, 0)  # Bright Green for target detection
+                label = f"Target G{assigned_gid}: {det['score']:.2f}"
+            elif assigned_gid is not None:
+                box_col = gate_palette[(assigned_gid - 1) % len(gate_palette)]
+                label = f"YOLO G{assigned_gid}: {det['score']:.2f}"
+            else:
+                box_col = (140, 140, 140)  # Gray for unassigned
+                label = f"Gate?: {det['score']:.2f}"
+
+            cv2.rectangle(vis_img, (x1, y1), (x2, y2), box_col, 2)
+            cv2.putText(vis_img, label, (x1, max(15, y1 - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, box_col, 2, cv2.LINE_AA)
+
+            # Keypoints
             for i in range(len(det['kp_x'])):
                 kx, ky, vis = int(det['kp_x'][i]), int(det['kp_y'][i]), det['kp_vis'][i]
                 if vis >= self.corner_conf_thresh:
-                    # Red for main corners 6..9, orange/cyan for inner keypoints
-                    color = (0, 0, 255) if 6 <= i <= 9 else (255, 250, 0)
-                    cv2.circle(vis_img, (kx, ky), 4, color, -1)
+                    kp_col = (0, 0, 255) if 6 <= i <= 9 else (255, 250, 0)
+                    cv2.circle(vis_img, (kx, ky), 4, kp_col, -1)
 
-        # 2. Draw Projected Gate Pixels (Prior Surveyed vs EKF Refined)
-        drawn_ekf_overlay = False
+        # 3. Draw EKF Refined Polygon & Innovation Vectors for active target gate
+        fsm_str = "SEARCHING"
+        fsm_col = (0, 165, 255)
+        nis_val = 0.0
+        max_innov_val = 0.0
+
         if self.latest_projected_corners is not None:
             age_sec = (self.get_clock().now() - self.last_projected_corners_time).nanoseconds * 1e-9
-            if age_sec < 1.0:
-                drawn_ekf_overlay = True
+            if age_sec < 1.5:
                 proj = self.latest_projected_corners
-                gate_id = proj['gate_id']
                 fsm_code = proj['fsm_code']
-                nis = proj['nis']
-                max_innov = proj['max_innov']
-
-                prior_pts = np.clip(proj['prior_pixels'], -2000, 4000).astype(np.int32)
+                nis_val = proj['nis']
+                max_innov_val = proj['max_innov']
                 ekf_pts = np.clip(proj['ekf_pixels'], -2000, 4000).astype(np.int32)
 
-                # A. Prior Gate (Cyan polygon: B=255, G=255, R=0)
-                cv2.polylines(vis_img, [prior_pts], isClosed=True, color=(255, 255, 0), thickness=2)
-                for pt in prior_pts:
-                    cv2.circle(vis_img, (int(pt[0]), int(pt[1])), 4, (255, 255, 0), -1)
-                cv2.putText(vis_img, f"Prior G{gate_id}",
-                            (prior_pts[0, 0] - 10, max(15, prior_pts[0, 1] - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1, cv2.LINE_AA)
-
-                # B. EKF Refined Gate (Magenta polygon: B=255, G=0, R=255)
+                # Draw EKF refined polygon in Magenta
                 cv2.polylines(vis_img, [ekf_pts], isClosed=True, color=(255, 0, 255), thickness=2)
                 for pt in ekf_pts:
                     cv2.circle(vis_img, (int(pt[0]), int(pt[1])), 4, (255, 0, 255), -1)
-                cv2.putText(vis_img, f"EKF G{gate_id}",
+                cv2.putText(vis_img, f"EKF G{target_gate_id}",
                             (ekf_pts[1, 0] - 10, max(15, ekf_pts[1, 1] - 8)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 255), 1, cv2.LINE_AA)
 
-                # C. Correction Vectors: Prior -> EKF (Light Gray dashed/thin line)
-                for k in range(4):
-                    p_prior = (int(prior_pts[k, 0]), int(prior_pts[k, 1]))
-                    p_ekf = (int(ekf_pts[k, 0]), int(ekf_pts[k, 1]))
-                    if math.hypot(p_ekf[0] - p_prior[0], p_ekf[1] - p_prior[1]) >= 2:
-                        cv2.line(vis_img, p_prior, p_ekf, (200, 200, 200), 1, cv2.LINE_AA)
+                fsm_str = {0: "BOOTSTRAP", 1: "TRACKING", 2: "REJECTED", 3: "RECOVERY"}.get(int(fsm_code), "UNKNOWN")
+                fsm_col = {
+                    0: (0, 255, 255),
+                    1: (0, 255, 0),
+                    2: (0, 165, 255),
+                    3: (0, 0, 255)
+                }.get(int(fsm_code), (200, 200, 200))
 
-                # D. Innovation Vectors: EKF -> YOLO detection (Yellow arrow)
-                # Canonical corner mapping:
-                # EKF corners: 0: TL, 1: TR, 2: BR, 3: BL
-                # YOLO keypoints: 7: TL, 8: TR, 9: BR, 6: BL
-                if best_det is not None:
+                # Draw innovation arrows from EKF corners to YOLO detected corners
+                if target_det is not None:
                     k_to_yolo = [7, 8, 9, 6]
                     for k in range(4):
                         yolo_idx = k_to_yolo[k]
-                        if best_det['kp_vis'][yolo_idx] >= self.corner_conf_thresh:
-                            p_yolo = (int(best_det['kp_x'][yolo_idx]), int(best_det['kp_y'][yolo_idx]))
+                        if target_det['kp_vis'][yolo_idx] >= self.corner_conf_thresh:
+                            p_yolo = (int(target_det['kp_x'][yolo_idx]), int(target_det['kp_y'][yolo_idx]))
                             p_ekf = (int(ekf_pts[k, 0]), int(ekf_pts[k, 1]))
                             cv2.arrowedLine(vis_img, p_ekf, p_yolo, (0, 255, 255), 1, tipLength=0.25)
 
-                # E. Telemetry HUD Box (Top-Left)
-                box_w, box_h = 245, 76
-                overlay = vis_img.copy()
-                cv2.rectangle(overlay, (10, 10), (10 + box_w, 10 + box_h), (20, 20, 20), -1)
-                cv2.addWeighted(overlay, 0.65, vis_img, 0.35, 0, vis_img)
-                cv2.rectangle(vis_img, (10, 10), (10 + box_w, 10 + box_h), (80, 80, 80), 1)
+        # If no EKF overlay but target_det and prior exist, draw arrows from Prior to YOLO
+        elif target_det is not None and target_gate_id in projected_priors:
+            prior_corners = np.clip(projected_priors[target_gate_id]['corners'], -2000, 4000).astype(np.int32)
+            k_to_yolo = [7, 8, 9, 6]
+            for k in range(4):
+                yolo_idx = k_to_yolo[k]
+                if target_det['kp_vis'][yolo_idx] >= self.corner_conf_thresh:
+                    p_yolo = (int(target_det['kp_x'][yolo_idx]), int(target_det['kp_y'][yolo_idx]))
+                    p_prior = (int(prior_corners[k, 0]), int(prior_corners[k, 1]))
+                    cv2.arrowedLine(vis_img, p_prior, p_yolo, (0, 255, 255), 1, tipLength=0.25)
 
-                fsm_str = {0: "BOOTSTRAP", 1: "TRACKING", 2: "REJECTED", 3: "RECOVERY"}.get(int(fsm_code), "UNKNOWN")
-                fsm_col = {
-                    0: (0, 255, 255),   # Yellow
-                    1: (0, 255, 0),     # Green
-                    2: (0, 165, 255),   # Orange
-                    3: (0, 0, 255)      # Red
-                }.get(int(fsm_code), (200, 200, 200))
+        # 4. Telemetry HUD Box (Top-Left)
+        box_w, box_h = 285, 82
+        overlay = vis_img.copy()
+        cv2.rectangle(overlay, (10, 10), (10 + box_w, 10 + box_h), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.70, vis_img, 0.30, 0, vis_img)
+        cv2.rectangle(vis_img, (10, 10), (10 + box_w, 10 + box_h), (80, 80, 80), 1)
 
-                cv2.putText(vis_img, f"GATE {gate_id}: {fsm_str}", (18, 28),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, fsm_col, 1, cv2.LINE_AA)
-                cv2.putText(vis_img, f"NIS: {nis:.2f}  MaxInn: {max_innov:.1f}px", (18, 46),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.40, (220, 220, 220), 1, cv2.LINE_AA)
-                cv2.putText(vis_img, "Cyan:Prior  Mag:EKF  Yel:Inn", (18, 64),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 180, 180), 1, cv2.LINE_AA)
+        target_dist = projected_priors[target_gate_id]['dist'] if target_gate_id in projected_priors else 0.0
 
-        # Fallback: Direct Prior Projection when gate_estimator_node is not running
-        if not drawn_ekf_overlay and self.drone_pos_w is not None and self.camera_matrix is not None:
-            self.draw_direct_prior_projection(vis_img, best_det)
+        cv2.putText(vis_img, f"TARGET: GATE {target_gate_id} ({fsm_str})", (18, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, fsm_col, 1, cv2.LINE_AA)
+        cv2.putText(vis_img, f"Dist: {target_dist:.1f}m  CamPitch: {self.camera_pitch_deg:.1f}*", (18, 46),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (220, 220, 220), 1, cv2.LINE_AA)
+        cv2.putText(vis_img, f"NIS: {nis_val:.2f}  MaxInn: {max_innov_val:.1f}px", (18, 64),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (220, 220, 220), 1, cv2.LINE_AA)
+        cv2.putText(vis_img, "Colors: Cyan:Priors Mag:EKF Grn:Target Yel:Inn", (18, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.33, (180, 180, 180), 1, cv2.LINE_AA)
 
         if publish_raw:
             debug_msg = Image()
@@ -578,86 +832,6 @@ class GateYoloNode(Node):
             if ret:
                 comp_msg.data = jpeg_buf.tobytes()
                 self.pub_debug_compressed.publish(comp_msg)
-
-    def draw_direct_prior_projection(self, vis_img, best_det):
-        """Directly projects target gate prior into camera image without requiring gate_estimator_node."""
-        gate_list = WEBOTS_GATES if self.prior_source == 'webots_world' else DEFINED_PRIORS
-        if not (0 <= self.active_target_gate_idx < len(gate_list)):
-            return
-
-        gid, gx, gy, gz, gyaw = gate_list[self.active_target_gate_idx]
-        pos_enu = np.array([gx, gy, gz], dtype=np.float64)
-        dist = float(np.linalg.norm(pos_enu - self.drone_pos_w))
-
-        hw = self.gate_w / 2.0
-        hh = self.gate_h / 2.0
-        u_lat = np.array([-math.sin(gyaw), math.cos(gyaw), 0.0], dtype=np.float64)
-        u_vert = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        corners_w = [
-            pos_enu + hw * u_lat + hh * u_vert,  # TL
-            pos_enu - hw * u_lat + hh * u_vert,  # TR
-            pos_enu - hw * u_lat - hh * u_vert,  # BR
-            pos_enu + hw * u_lat - hh * u_vert,  # BL
-        ]
-
-        R_bc = get_camera_to_body_rotation(self.camera_pitch_deg)
-        fx = self.camera_matrix[0, 0]
-        fy = self.camera_matrix[1, 1]
-        cx = self.camera_matrix[0, 2]
-        cy = self.camera_matrix[1, 2]
-
-        proj_pts = []
-        all_ok = True
-        depths = []
-        for c_w in corners_w:
-            p_c = world_to_camera_rdf(c_w, self.drone_pos_w, self.R_wb, R_bc)
-            depths.append(p_c[2])
-            if p_c[2] < 0.2:
-                all_ok = False
-                break
-            u = fx * (p_c[0] / p_c[2]) + cx
-            v = fy * (p_c[1] / p_c[2]) + cy
-            proj_pts.append([u, v])
-
-        # Telemetry HUD Box (Top-Left)
-        box_w, box_h = 280, 80
-        overlay = vis_img.copy()
-        cv2.rectangle(overlay, (10, 10), (10 + box_w, 10 + box_h), (20, 20, 20), -1)
-        cv2.addWeighted(overlay, 0.70, vis_img, 0.30, 0, vis_img)
-        cv2.rectangle(vis_img, (10, 10), (10 + box_w, 10 + box_h), (80, 80, 80), 1)
-
-        cv2.putText(vis_img, f"DIRECT PRIOR: GATE {gid} ({self.prior_source})", (18, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1, cv2.LINE_AA)
-        cv2.putText(vis_img, f"Dist: {dist:.1f}m  CamPitch: {self.camera_pitch_deg:.1f}*", (18, 46),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (220, 220, 220), 1, cv2.LINE_AA)
-
-        if all_ok:
-            pts = np.clip(np.array(proj_pts, dtype=np.float32), -2000, 4000).astype(np.int32)
-            cv2.polylines(vis_img, [pts], isClosed=True, color=(255, 255, 0), thickness=2)
-            corner_names = ["TL", "TR", "BR", "BL"]
-            for k in range(4):
-                cv2.circle(vis_img, (int(pts[k, 0]), int(pts[k, 1])), 4, (255, 255, 0), -1)
-                cv2.putText(vis_img, corner_names[k], (int(pts[k, 0]) - 10, int(pts[k, 1]) - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 0), 1, cv2.LINE_AA)
-            cv2.putText(vis_img, f"Prior G{gid}", (pts[0, 0] - 10, max(15, pts[0, 1] - 12)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1, cv2.LINE_AA)
-
-            # Draw vectors from Prior to YOLO detected corners (Yellow arrows)
-            if best_det is not None:
-                k_to_yolo = [7, 8, 9, 6]
-                for k in range(4):
-                    yolo_idx = k_to_yolo[k]
-                    if best_det['kp_vis'][yolo_idx] >= self.corner_conf_thresh:
-                        p_yolo = (int(best_det['kp_x'][yolo_idx]), int(best_det['kp_y'][yolo_idx]))
-                        p_prior = (int(pts[k, 0]), int(pts[k, 1]))
-                        cv2.arrowedLine(vis_img, p_prior, p_yolo, (0, 255, 255), 1, tipLength=0.25)
-
-            cv2.putText(vis_img, f"TL:({pts[0,0]},{pts[0,1]}) TR:({pts[1,0]},{pts[1,1]})", (18, 64),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.36, (200, 200, 200), 1, cv2.LINE_AA)
-        else:
-            depth_val = depths[0] if depths else 0.0
-            cv2.putText(vis_img, f"Gate {gid} behind/outside view (Z_cam={depth_val:.2f}m)", (18, 64),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.36, (0, 100, 255), 1, cv2.LINE_AA)
 
 
 def main(args=None):

@@ -23,6 +23,7 @@ import cv2
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import Image, CompressedImage, CameraInfo
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Header, Int32
@@ -54,8 +55,8 @@ WEBOTS_GATES = [
 
 
 class TestGateProjectionNode(Node):
-    def __init__(self):
-        super().__init__('test_gate_projection_node')
+    def __init__(self, **kwargs):
+        super().__init__('test_gate_projection_node', **kwargs)
 
         # Parameters
         self.declare_parameter('camera_pitch_deg', 15.0)
@@ -76,8 +77,12 @@ class TestGateProjectionNode(Node):
         self.show_all_gates = bool(self.get_parameter('show_all_gates').value)
         self.target_gate_idx = int(self.get_parameter('target_gate_idx').value)
 
+        # Dynamic parameter reconfiguration callback
+        self.add_on_set_parameters_callback(self.parameters_callback)
+
         # State
         self.camera_matrix = None
+        self.intrinsics_from_topic = False
         self.drone_pos_w = np.zeros(3, dtype=np.float64)
         self.drone_quat_w = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         self.R_wb = np.eye(3, dtype=np.float64)
@@ -126,11 +131,53 @@ class TestGateProjectionNode(Node):
             f"Continuous 20 Hz stream active on /perception/debug_image & /perception/debug_image/compressed"
         )
 
+    @staticmethod
+    def _extract_param_value(param):
+        val = getattr(param, 'value', None)
+        if hasattr(val, 'type') and hasattr(val, 'double_value'):
+            # rcl_interfaces.msg.ParameterValue
+            if val.type == 3:  # PARAMETER_DOUBLE
+                return val.double_value
+            elif val.type == 2:  # PARAMETER_INTEGER
+                return val.integer_value
+            elif val.type == 4:  # PARAMETER_STRING
+                return val.string_value
+            elif val.type == 1:  # PARAMETER_BOOL
+                return val.bool_value
+        return val
+
+    def parameters_callback(self, params):
+        for param in params:
+            val = self._extract_param_value(param)
+            if val is None:
+                continue
+            if param.name == 'camera_pitch_deg':
+                self.camera_pitch_deg = float(val)
+                self.get_logger().info(f"Dynamic param update: camera_pitch_deg = {self.camera_pitch_deg:.1f} deg")
+            elif param.name == 'gate_width_m':
+                self.gate_w = float(val)
+                self.get_logger().info(f"Dynamic param update: gate_width_m = {self.gate_w:.2f}m")
+            elif param.name == 'gate_height_m':
+                self.gate_h = float(val)
+                self.get_logger().info(f"Dynamic param update: gate_height_m = {self.gate_h:.2f}m")
+            elif param.name == 'prior_source':
+                self.prior_source = str(val).lower()
+                self.get_logger().info(f"Dynamic param update: prior_source = {self.prior_source}")
+            elif param.name == 'show_all_gates':
+                self.show_all_gates = bool(val)
+                self.get_logger().info(f"Dynamic param update: show_all_gates = {self.show_all_gates}")
+            elif param.name == 'target_gate_idx':
+                self.target_gate_idx = int(val)
+                self.get_logger().info(f"Dynamic param update: target_gate_idx = {self.target_gate_idx}")
+        return SetParametersResult(successful=True)
+
     def cam_info_callback(self, msg: CameraInfo):
-        if self.camera_matrix is None:
-            self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape((3, 3))
+        first_time = not self.intrinsics_from_topic
+        self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape((3, 3))
+        self.intrinsics_from_topic = True
+        if first_time:
             self.get_logger().info(
-                f"Camera intrinsics received: fx={self.camera_matrix[0,0]:.1f}, "
+                f"Camera intrinsics received from topic: fx={self.camera_matrix[0,0]:.1f}, "
                 f"fy={self.camera_matrix[1,1]:.1f}, cx={self.camera_matrix[0,2]:.1f}, cy={self.camera_matrix[1,2]:.1f}"
             )
 
@@ -172,16 +219,16 @@ class TestGateProjectionNode(Node):
         c_bl = center_enu + hw * u_lat - hh * u_vert
         return [c_tl, c_tr, c_br, c_bl]
 
-    def project_corner(self, corner_enu, R_bc):
-        """Transform corner ENU -> camera RDF -> 2D pixel (u, v)."""
+    def project_corner(self, corner_enu, R_bc, K):
+        """Transform corner ENU -> camera RDF -> 2D pixel (u, v) using camera matrix K."""
         p_c = world_to_camera_rdf(corner_enu, self.drone_pos_w, self.R_wb, R_bc)
         if p_c[2] < 0.2:
             return None, p_c[2]
 
-        fx = self.camera_matrix[0, 0]
-        fy = self.camera_matrix[1, 1]
-        cx = self.camera_matrix[0, 2]
-        cy = self.camera_matrix[1, 2]
+        fx = K[0, 0]
+        fy = K[1, 1]
+        cx = K[0, 2]
+        cy = K[1, 2]
 
         u = fx * (p_c[0] / p_c[2]) + cx
         v = fy * (p_c[1] / p_c[2]) + cy
@@ -209,7 +256,7 @@ class TestGateProjectionNode(Node):
 
     def generate_synthetic_canvas(self):
         """Generates a clean synthetic camera frame if live video stream is not arriving."""
-        w, h = 640, 480
+        w, h = 640, 640
         canvas = np.zeros((h, w, 3), dtype=np.uint8)
         # Sky (dark blue gradient)
         canvas[:int(h * 0.6), :] = [50, 30, 20]
@@ -236,18 +283,22 @@ class TestGateProjectionNode(Node):
 
         h_img, w_img = vis_img.shape[:2]
 
-        # Camera intrinsics fallback (60 deg horizontal FOV)
-        if self.camera_matrix is None:
+        # Determine active camera matrix K (from topic or dynamically computed for this frame)
+        if self.camera_matrix is not None:
+            active_K = self.camera_matrix
+            intrinsics_src = "TOPIC" if self.intrinsics_from_topic else "MANUAL"
+        else:
             fov = 1.03
             cx = w_img / 2.0
             cy = h_img / 2.0
             fx = cx / math.tan(fov / 2.0)
             fy = fx
-            self.camera_matrix = np.array([
+            active_K = np.array([
                 [fx, 0.0, cx],
                 [0.0, fy, cy],
                 [0.0, 0.0, 1.0]
             ], dtype=np.float64)
+            intrinsics_src = f"FALLBACK ({w_img}x{h_img})"
 
         R_bc = get_camera_to_body_rotation(self.camera_pitch_deg)
         gates_to_test = self.get_gate_list()
@@ -283,7 +334,7 @@ class TestGateProjectionNode(Node):
             depths = []
 
             for c_w in corners_w:
-                px, depth = self.project_corner(c_w, R_bc)
+                px, depth = self.project_corner(c_w, R_bc, active_K)
                 depths.append(depth)
                 if px is None:
                     all_valid = False
@@ -311,7 +362,7 @@ class TestGateProjectionNode(Node):
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, c_col, 1, cv2.LINE_AA)
 
                 # Draw Gate Center & Label
-                center_px, _ = self.project_corner(pos_enu, R_bc)
+                center_px, _ = self.project_corner(pos_enu, R_bc, active_K)
                 if center_px is not None:
                     cx_i, cy_i = int(center_px[0]), int(center_px[1])
                     cv2.drawMarker(vis_img, (cx_i, cy_i), gate_col, cv2.MARKER_CROSS, 14, 2)
@@ -327,6 +378,7 @@ class TestGateProjectionNode(Node):
                         'dist': dist,
                         'in_view': True,
                         'corners': proj_corners,
+                        'center_px': center_px,
                         'depth': np.mean(depths)
                     }
             else:
@@ -336,11 +388,12 @@ class TestGateProjectionNode(Node):
                         'dist': dist,
                         'in_view': False,
                         'corners': [],
+                        'center_px': None,
                         'depth': depths[0] if depths else 0.0
                     }
 
         # ----------------- HUD Telemetry Box (Top-Left) -----------------
-        hud_w, hud_h = 320, 120
+        hud_w, hud_h = 350, 136
         overlay = vis_img.copy()
         cv2.rectangle(overlay, (10, 10), (10 + hud_w, 10 + hud_h), (20, 20, 20), -1)
         cv2.addWeighted(overlay, 0.70, vis_img, 0.30, 0, vis_img)
@@ -354,22 +407,24 @@ class TestGateProjectionNode(Node):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.38, (220, 220, 220), 1, cv2.LINE_AA)
         cv2.putText(vis_img, f"Source: {self.prior_source.upper()}  Pitch: {self.camera_pitch_deg:.1f}*", (16, 64),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 220, 180), 1, cv2.LINE_AA)
+        cv2.putText(vis_img, f"K: fx={active_K[0,0]:.1f} cx={active_K[0,2]:.0f} cy={active_K[1,2]:.0f} [{intrinsics_src}]", (16, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (160, 200, 255), 1, cv2.LINE_AA)
 
         if active_target_hud_info is not None:
             gid = active_target_hud_info['id']
             dist = active_target_hud_info['dist']
             if active_target_hud_info['in_view']:
                 c = active_target_hud_info['corners']
-                cv2.putText(vis_img, f"Target G{gid}: Dist={dist:.1f}m (IN VIEW)", (16, 82),
+                cv2.putText(vis_img, f"Target G{gid}: Dist={dist:.1f}m (IN VIEW)", (16, 98),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 255, 0), 1, cv2.LINE_AA)
-                cv2.putText(vis_img, f"TL:({c[0][0]:.0f},{c[0][1]:.0f}) TR:({c[1][0]:.0f},{c[1][1]:.0f})", (16, 100),
+                cv2.putText(vis_img, f"TL:({c[0][0]:.0f},{c[0][1]:.0f}) TR:({c[1][0]:.0f},{c[1][1]:.0f})", (16, 114),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.36, (200, 200, 200), 1, cv2.LINE_AA)
-                cv2.putText(vis_img, f"BR:({c[2][0]:.0f},{c[2][1]:.0f}) BL:({c[3][0]:.0f},{c[3][1]:.0f})", (16, 116),
+                cv2.putText(vis_img, f"BR:({c[2][0]:.0f},{c[2][1]:.0f}) BL:({c[3][0]:.0f},{c[3][1]:.0f})", (16, 130),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.36, (200, 200, 200), 1, cv2.LINE_AA)
             else:
-                cv2.putText(vis_img, f"Target G{gid}: Dist={dist:.1f}m (OUT OF VIEW / BEHIND)", (16, 82),
+                cv2.putText(vis_img, f"Target G{gid}: Dist={dist:.1f}m (OUT OF VIEW / BEHIND)", (16, 98),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 0, 255), 1, cv2.LINE_AA)
-                cv2.putText(vis_img, f"Z_cam={active_target_hud_info['depth']:.2f}m (< 0.2m)", (16, 102),
+                cv2.putText(vis_img, f"Z_cam={active_target_hud_info['depth']:.2f}m (< 0.2m)", (16, 116),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.36, (180, 180, 180), 1, cv2.LINE_AA)
 
         # Publish Debug Image (raw)
@@ -397,16 +452,19 @@ class TestGateProjectionNode(Node):
         if (now - self.last_log_time).nanoseconds * 1e-9 >= 2.0:
             self.last_log_time = now
             status_str = "LIVE" if not is_synthetic else "SYNTHETIC"
+            k_str = f"K(fx={active_K[0,0]:.1f}, cy={active_K[1,2]:.1f}) [{intrinsics_src}]"
             if active_target_hud_info and active_target_hud_info['in_view']:
                 c = active_target_hud_info['corners']
                 self.get_logger().info(
-                    f"[{status_str}] Target Gate {active_target_hud_info['id']} ({active_target_hud_info['dist']:.1f}m): "
+                    f"[{status_str} | Pitch:{self.camera_pitch_deg:.1f}° | {k_str}] "
+                    f"Target Gate {active_target_hud_info['id']} ({active_target_hud_info['dist']:.1f}m): "
                     f"TL=({c[0][0]:.0f},{c[0][1]:.0f}), TR=({c[1][0]:.0f},{c[1][1]:.0f}), "
                     f"BR=({c[2][0]:.0f},{c[2][1]:.0f}), BL=({c[3][0]:.0f},{c[3][1]:.0f})"
                 )
             elif active_target_hud_info:
                 self.get_logger().info(
-                    f"[{status_str}] Target Gate {active_target_hud_info['id']} at {active_target_hud_info['dist']:.1f}m "
+                    f"[{status_str} | Pitch:{self.camera_pitch_deg:.1f}° | {k_str}] "
+                    f"Target Gate {active_target_hud_info['id']} at {active_target_hud_info['dist']:.1f}m "
                     f"is behind camera or outside frustum (Z_cam={active_target_hud_info['depth']:.2f}m)"
                 )
 

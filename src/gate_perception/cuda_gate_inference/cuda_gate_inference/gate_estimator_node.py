@@ -18,6 +18,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
+from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import CameraInfo
 from geometry_msgs.msg import PolygonStamped, PoseStamped, PoseArray, Pose, Point, Quaternion
 from std_msgs.msg import Int32, Float64MultiArray, Header
@@ -54,8 +55,8 @@ class GateEstimatorNode(Node):
     ROS 2 Gate Estimator Node managing multi-gate track geometry and Pixel Innovation EKF.
     """
 
-    def __init__(self):
-        super().__init__('gate_estimator_node')
+    def __init__(self, **kwargs):
+        super().__init__('gate_estimator_node', **kwargs)
 
         # Parameters
         self.declare_parameter('estimation_method', 'pixel_innovation')  # 'pixel_innovation' or 'pnp'
@@ -65,7 +66,7 @@ class GateEstimatorNode(Node):
         self.declare_parameter('process_noise_q', 1e-4)
         self.declare_parameter('p0_sigma', 2.0)
         self.declare_parameter('camera_pitch_deg', 15.0)
-        self.declare_parameter('anchor_priors_at_takeoff', False)
+        self.declare_parameter('anchor_priors_at_takeoff', True)
         self.declare_parameter('cond_h_max', 1000.0)
         self.declare_parameter('max_innovation_px_sanity', 120.0)
         self.declare_parameter('max_consecutive_rejections', 5)
@@ -85,6 +86,9 @@ class GateEstimatorNode(Node):
         self.max_rejections = int(self.get_parameter('max_consecutive_rejections').value)
         self.max_refine_dist = float(self.get_parameter('max_refine_distance_m').value)
         self.v7 = bool(self.get_parameter('v7').value)
+
+        # Dynamic parameter reconfiguration
+        self.add_on_set_parameters_callback(self.parameters_callback)
 
         # Core EKF Instance
         self.ekf = PixelInnovationEKF(
@@ -207,10 +211,48 @@ class GateEstimatorNode(Node):
                 f"[{active_gate.position_enu[0]:.2f}, {active_gate.position_enu[1]:.2f}, {active_gate.position_enu[2]:.2f}]"
             )
 
+    @staticmethod
+    def _extract_param_value(param):
+        val = getattr(param, 'value', None)
+        if hasattr(val, 'type') and hasattr(val, 'double_value'):
+            if val.type == 3:
+                return val.double_value
+            elif val.type == 2:
+                return val.integer_value
+            elif val.type == 4:
+                return val.string_value
+            elif val.type == 1:
+                return val.bool_value
+        return val
+
+    def parameters_callback(self, params):
+        for param in params:
+            val = self._extract_param_value(param)
+            if val is None:
+                continue
+            if param.name == 'camera_pitch_deg':
+                self.camera_pitch_deg = float(val)
+                self.ekf.set_camera_pitch(self.camera_pitch_deg)
+                self.get_logger().info(f"Dynamic param update: camera_pitch_deg = {self.camera_pitch_deg:.1f}°")
+            elif param.name == 'sigma_pixel':
+                self.sigma_pixel = float(val)
+                self.ekf.sigma_pixel = self.sigma_pixel
+                self.get_logger().info(f"Dynamic param update: sigma_pixel = {self.sigma_pixel:.2f}px")
+            elif param.name == 'process_noise_q':
+                self.process_noise_q = float(val)
+                self.ekf.process_noise_q = self.process_noise_q
+                self.get_logger().info(f"Dynamic param update: process_noise_q = {self.process_noise_q:.2e}")
+        return SetParametersResult(successful=True)
+
     def camera_info_callback(self, msg: CameraInfo):
-        if self.camera_matrix is None:
-            self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape((3, 3))
-            self.dist_coeffs = np.array(msg.d, dtype=np.float64) if len(msg.d) > 0 else np.zeros((5, 1))
+        first_time = (self.camera_matrix is None)
+        self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape((3, 3))
+        self.dist_coeffs = np.array(msg.d, dtype=np.float64) if len(msg.d) > 0 else np.zeros((5, 1))
+        if first_time:
+            self.get_logger().info(
+                f"Camera intrinsics registered: fx={self.camera_matrix[0,0]:.2f}, fy={self.camera_matrix[1,1]:.2f}, "
+                f"cx={self.camera_matrix[0,2]:.1f}, cy={self.camera_matrix[1,2]:.1f}"
+            )
 
     def drone_pose_callback(self, msg: PoseStamped):
         self.drone_pos_w = np.array([
@@ -277,12 +319,23 @@ class GateEstimatorNode(Node):
         if len(msg.polygon.points) < 3:
             return
 
-        # Distance Gating: Skip updates if drone is further than max_refine_dist from gate prior
         target_idx = self.active_target_gate_idx
         if target_idx < 0 or target_idx >= len(self.gates):
             return
 
         active_gate = self.gates[target_idx]
+
+        # Gate ID Verification: ensure incoming corners strictly belong to the active target gate
+        if msg.header.frame_id and msg.header.frame_id.startswith("gate_"):
+            try:
+                msg_gate_id = int(msg.header.frame_id.split("_")[1])
+                if msg_gate_id != active_gate.id:
+                    # Ignore corner keypoints from other gates
+                    return
+            except ValueError:
+                pass
+
+        # Distance Gating: Skip updates if drone is further than max_refine_dist from gate prior
         dist_to_gate = float(np.linalg.norm(active_gate.position_enu - self.drone_pos_w))
         if dist_to_gate > self.max_refine_dist:
             return
