@@ -7,6 +7,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/int32.hpp>
+#include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <mavros_msgs/msg/state.hpp>
 #include <mavros_msgs/msg/position_target.hpp>
@@ -102,6 +104,32 @@ public:
                 }
             });
 
+        // Publisher for Action Space Limits telemetry [max_action_magnitude, max_yaw_rate_deg]
+        action_limits_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
+            "/controller/action_limits", 10);
+
+        // Subscribers to dynamically set Action Space Limits from GCS
+        set_max_action_mag_sub_ = this->create_subscription<std_msgs::msg::Float64>(
+            "/controller/set_max_action_magnitude", qos_reliable,
+            [this](const std_msgs::msg::Float64::SharedPtr msg) {
+                if (msg) {
+                    policy_.setMaxActionMagnitude(msg->data);
+                    RCLCPP_INFO(this->get_logger(), "Max Action Magnitude updated to: %.2f m/s", policy_.getMaxActionMagnitude());
+                    publishActionLimits();
+                }
+            });
+
+        set_max_yaw_rate_sub_ = this->create_subscription<std_msgs::msg::Float64>(
+            "/controller/set_max_yaw_rate", qos_reliable,
+            [this](const std_msgs::msg::Float64::SharedPtr msg) {
+                if (msg) {
+                    policy_.setMaxYawRateDeg(msg->data);
+                    RCLCPP_INFO(this->get_logger(), "Max Yaw Rate updated to: %.1f deg/s (%.3f rad/s)",
+                        policy_.getMaxYawRateDeg(), policy_.getMaxYawRateRad());
+                    publishActionLimits();
+                }
+            });
+
         // Service Clients
         arming_client_ = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
         command_client_ = this->create_client<mavros_msgs::srv::CommandLong>("/mavros/cmd/command");
@@ -139,11 +167,19 @@ public:
         this->declare_parameter<bool>("enable_gate_1_1", true);
         bool enable_gate_1_1 = this->get_parameter("enable_gate_1_1").as_bool();
 
+        this->declare_parameter<double>("max_action_magnitude", 16.0);
+        double max_action_magnitude = this->get_parameter("max_action_magnitude").as_double();
+
+        this->declare_parameter<double>("max_yaw_rate_deg", 360.0);
+        double max_yaw_rate_deg = this->get_parameter("max_yaw_rate_deg").as_double();
+
         policy_.init(this, model_path);
         policy_.setTripleGatePassMethod(triple_gate_pass_method);
         policy_.setMaxAccel(max_accel);
         policy_.setV7(v7);
         policy_.setEnableGate1_1(enable_gate_1_1);
+        policy_.setMaxActionMagnitude(max_action_magnitude);
+        policy_.setMaxYawRateDeg(max_yaw_rate_deg);
 
         this->declare_parameter<double>("target_altitude", 1.0);
         target_altitude_ = this->get_parameter("target_altitude").as_double();
@@ -203,6 +239,17 @@ public:
             std_msgs::msg::Int32 prev_sub_msg;
             prev_sub_msg.data = static_cast<int32_t>(policy_.getPreviewSubGateIndex());
             preview_subgate_pub_->publish(prev_sub_msg);
+        }
+
+        publishActionLimits();
+    }
+
+    void publishActionLimits()
+    {
+        if (action_limits_pub_) {
+            std_msgs::msg::Float64MultiArray msg;
+            msg.data = {policy_.getMaxActionMagnitude(), policy_.getMaxYawRateDeg()};
+            action_limits_pub_->publish(msg);
         }
     }
 
@@ -823,6 +870,8 @@ private:
     rclcpp::Subscription<mavros_msgs::msg::HomePosition>::SharedPtr home_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr custom_home_sub_;
     rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr set_target_gate_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr set_max_action_mag_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr set_max_yaw_rate_sub_;
     
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr local_pos_pub_;
     rclcpp::Publisher<mavros_msgs::msg::PositionTarget>::SharedPtr local_raw_pub_;
@@ -831,6 +880,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr target_subgate_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr preview_gate_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr preview_subgate_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr action_limits_pub_;
 
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
     rclcpp::Client<mavros_msgs::srv::CommandLong>::SharedPtr command_client_;

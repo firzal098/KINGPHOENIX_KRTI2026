@@ -1,5 +1,13 @@
 <script>
-  import { structuredAction, rawAction, policyActionHz } from '../ros.js';
+  import { 
+    structuredAction, 
+    rawAction, 
+    policyActionHz, 
+    maxActionMagnitude, 
+    maxYawRateDeg, 
+    setMaxActionMagnitude, 
+    setMaxYawRateDeg 
+  } from '../ros.js';
 
   function fmt(val, dec = 2) {
     if (val === undefined || isNaN(val)) return '0.00';
@@ -144,6 +152,113 @@
           <span>-900°/s (CW)</span>
           <span class="zero-lbl">0.0</span>
           <span>+900°/s (CCW)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Action Space Ceiling Sliders (RL Maximum Commanded Velocity & Yaw Rate) -->
+  <div class="limits-section">
+    <div class="limits-header">
+      <div class="limits-title font-hud">
+        <span class="limits-icon">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </span>
+        <span>ACTION SPACE MAXIMUM CEILING</span>
+      </div>
+      <span class="limits-hint font-mono">Real-time RL Constraints</span>
+    </div>
+
+    <div class="limits-grid">
+      <!-- 1. Max Combined Horizontal Velocity (Forward + Lateral) -->
+      <div class="limit-control-card">
+        <div class="control-header">
+          <div class="control-label font-hud">
+            <span class="limit-dot cyan"></span>
+            <span>MAX HORIZONTAL VELOCITY</span>
+          </div>
+          <div class="control-badge font-mono badge-cyan">
+            {$maxActionMagnitude.toFixed(1)} <small>m/s</small>
+          </div>
+        </div>
+
+        <div class="slider-wrapper">
+          <input
+            type="range"
+            min="1.0"
+            max="16.0"
+            step="0.5"
+            value={$maxActionMagnitude}
+            on:input={(e) => setMaxActionMagnitude(e.target.value)}
+            class="range-slider slider-cyan"
+            aria-label="Maximum Combined Velocity Magnitude"
+          />
+          <div class="slider-ticks font-mono">
+            <span>1.0 m/s</span>
+            <span>4.0</span>
+            <span>8.0</span>
+            <span>12.0</span>
+            <span>16.0 m/s</span>
+          </div>
+        </div>
+
+        <!-- Quick Presets -->
+        <div class="presets-row">
+          {#each [4.0, 8.0, 12.0, 16.0] as preset}
+            <button
+              class="preset-btn font-mono {Math.abs($maxActionMagnitude - preset) < 0.2 ? 'active-cyan' : ''}"
+              on:click={() => setMaxActionMagnitude(preset)}
+            >
+              {preset}m/s
+            </button>
+          {/each}
+        </div>
+      </div>
+
+      <!-- 2. Max Yaw Rate -->
+      <div class="limit-control-card">
+        <div class="control-header">
+          <div class="control-label font-hud">
+            <span class="limit-dot amber"></span>
+            <span>MAX YAW ROTATION RATE</span>
+          </div>
+          <div class="control-badge font-mono badge-amber">
+            {$maxYawRateDeg}°/s <small class="rad-badge">({(($maxYawRateDeg * Math.PI) / 180).toFixed(2)} rad/s)</small>
+          </div>
+        </div>
+
+        <div class="slider-wrapper">
+          <input
+            type="range"
+            min="20"
+            max="360"
+            step="5"
+            value={$maxYawRateDeg}
+            on:input={(e) => setMaxYawRateDeg(e.target.value)}
+            class="range-slider slider-amber"
+            aria-label="Maximum Yaw Rotation Rate"
+          />
+          <div class="slider-ticks font-mono">
+            <span>20°/s</span>
+            <span>90°</span>
+            <span>180°</span>
+            <span>270°</span>
+            <span>360°/s</span>
+          </div>
+        </div>
+
+        <!-- Quick Presets -->
+        <div class="presets-row">
+          {#each [45, 90, 180, 360] as preset}
+            <button
+              class="preset-btn font-mono {Math.abs($maxYawRateDeg - preset) < 3 ? 'active-amber' : ''}"
+              on:click={() => setMaxYawRateDeg(preset)}
+            >
+              {preset}°/s
+            </button>
+          {/each}
         </div>
       </div>
     </div>
@@ -318,5 +433,226 @@
 
   .zero-lbl {
     color: var(--text-secondary);
+  }
+
+  /* --- Action Space Limits Section --- */
+  .limits-section {
+    margin-top: 2px;
+    padding: 10px 12px;
+    background: rgba(10, 15, 24, 0.65);
+    border: 1px solid rgba(0, 240, 255, 0.12);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .limits-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .limits-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: var(--text-primary);
+  }
+
+  .limits-icon {
+    color: var(--accent-cyan);
+    display: flex;
+    align-items: center;
+  }
+
+  .limits-hint {
+    font-size: 0.62rem;
+    color: var(--text-muted);
+    letter-spacing: 0.02em;
+  }
+
+  .limits-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  @media (max-width: 900px) {
+    .limits-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .limit-control-card {
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 5px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .control-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .control-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.70rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .limit-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+
+  .limit-dot.cyan {
+    background: var(--accent-cyan);
+    box-shadow: 0 0 6px var(--accent-cyan-glow);
+  }
+
+  .limit-dot.amber {
+    background: var(--accent-amber);
+    box-shadow: 0 0 6px var(--accent-amber-glow);
+  }
+
+  .control-badge {
+    font-size: 0.78rem;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 4px;
+    display: flex;
+    align-items: baseline;
+    gap: 3px;
+  }
+
+  .control-badge small {
+    font-size: 0.62rem;
+    font-weight: 500;
+    opacity: 0.8;
+  }
+
+  .control-badge .rad-badge {
+    color: var(--text-muted);
+    font-size: 0.62rem;
+    margin-left: 2px;
+  }
+
+  .badge-cyan {
+    background: rgba(0, 240, 255, 0.12);
+    color: var(--accent-cyan);
+    border: 1px solid rgba(0, 240, 255, 0.3);
+    box-shadow: 0 0 10px rgba(0, 240, 255, 0.15);
+  }
+
+  .badge-amber {
+    background: rgba(245, 158, 11, 0.12);
+    color: var(--accent-amber);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    box-shadow: 0 0 10px rgba(245, 158, 11, 0.15);
+  }
+
+  .slider-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .range-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    outline: none;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .range-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 2px solid #000;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .range-slider:active::-webkit-slider-thumb {
+    transform: scale(1.2);
+  }
+
+  .slider-cyan::-webkit-slider-thumb {
+    background: var(--accent-cyan);
+    box-shadow: 0 0 8px var(--accent-cyan-glow);
+  }
+
+  .slider-amber::-webkit-slider-thumb {
+    background: var(--accent-amber);
+    box-shadow: 0 0 8px var(--accent-amber-glow);
+  }
+
+  .slider-ticks {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.58rem;
+    color: var(--text-muted);
+    padding: 0 2px;
+  }
+
+  .presets-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 2px;
+  }
+
+  .preset-btn {
+    flex: 1;
+    padding: 3px 0;
+    font-size: 0.64rem;
+    font-weight: 600;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .preset-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+    border-color: rgba(255, 255, 255, 0.18);
+  }
+
+  .preset-btn.active-cyan {
+    background: rgba(0, 240, 255, 0.2);
+    border-color: var(--accent-cyan);
+    color: #fff;
+    box-shadow: 0 0 8px var(--accent-cyan-glow);
+  }
+
+  .preset-btn.active-amber {
+    background: rgba(245, 158, 11, 0.2);
+    border-color: var(--accent-amber);
+    color: #fff;
+    box-shadow: 0 0 8px var(--accent-amber-glow);
   }
 </style>

@@ -96,6 +96,10 @@ export const policyActionHz = writable(0);
 export const gateEstimatorHz = writable(0);
 export const cameraFps = writable(0);
 
+// Action Space Maximum Constraints
+export const maxActionMagnitude = writable(16.0); // Range: 1.0 to 16.0 m/s
+export const maxYawRateDeg = writable(360.0);      // Range: 20 to 360 deg/s
+
 export const droneVel = writable({
   vx: 0.0,
   vy: 0.0,
@@ -572,6 +576,19 @@ function subscribeTopics() {
     }
   });
 
+  // 8. Action Space Maximum Limits Telemetry
+  const actionLimitsSub = new ROSLIB.Topic({
+    ros,
+    name: '/controller/action_limits',
+    messageType: 'std_msgs/msg/Float64MultiArray',
+  });
+  actionLimitsSub.subscribe((msg) => {
+    if (msg?.data && msg.data.length >= 2) {
+      maxActionMagnitude.set(Number(msg.data[0].toFixed(1)));
+      maxYawRateDeg.set(Math.round(msg.data[1]));
+    }
+  });
+
   // Subscribe to perception stream if active
   let active;
   isPerceptionStreamActive.subscribe((v) => (active = v))();
@@ -765,4 +782,30 @@ export function setTargetGate(index) {
   targetGateIndex.set(targetIndex);
   targetSubGateIndex.set(0);
   addToast(`🎯 Active Target switched to: GATE #${targetIndex + 1}`, 'info', 2000);
+}
+
+// Dynamically set Maximum Action Space Magnitude (Forward and Lateral Combined, 1.0 - 16.0 m/s)
+export function setMaxActionMagnitude(val) {
+  const clamped = Math.max(1.0, Math.min(16.0, parseFloat(val) || 16.0));
+  maxActionMagnitude.set(Number(clamped.toFixed(1)));
+  if (!ros) return;
+  const topic = new ROSLIB.Topic({
+    ros,
+    name: '/controller/set_max_action_magnitude',
+    messageType: 'std_msgs/msg/Float64',
+  });
+  topic.publish(new ROSLIB.Message({ data: clamped }));
+}
+
+// Dynamically set Maximum Yaw Rate Limit (20 - 360 deg/s)
+export function setMaxYawRateDeg(valDeg) {
+  const clamped = Math.max(20.0, Math.min(360.0, parseFloat(valDeg) || 360.0));
+  maxYawRateDeg.set(Math.round(clamped));
+  if (!ros) return;
+  const topic = new ROSLIB.Topic({
+    ros,
+    name: '/controller/set_max_yaw_rate',
+    messageType: 'std_msgs/msg/Float64',
+  });
+  topic.publish(new ROSLIB.Message({ data: clamped }));
 }

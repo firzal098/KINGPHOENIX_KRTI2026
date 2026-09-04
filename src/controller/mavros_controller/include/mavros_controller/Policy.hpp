@@ -56,6 +56,12 @@ public:
         if (node_->has_parameter("enable_gate_1_1")) {
             enable_gate_1_1_ = node_->get_parameter("enable_gate_1_1").as_bool();
         }
+        if (node_->has_parameter("max_action_magnitude")) {
+            max_action_magnitude_ = node_->get_parameter("max_action_magnitude").as_double();
+        }
+        if (node_->has_parameter("max_yaw_rate_deg")) {
+            setMaxYawRateDeg(node_->get_parameter("max_yaw_rate_deg").as_double());
+        }
 
         auto qos_reliable = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
         auto qos_best_effort = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
@@ -739,6 +745,18 @@ public:
                     prev_action_[1] = (prev_action_[1] / mag) * 4.0;
                 }
             }
+
+            // Absolute Maximum Action Limits (Enforced by GCS / user ceiling across all gates)
+            // 1. Combined horizontal velocity magnitude [v_fwd, v_left]
+            double horiz_mag = std::hypot(prev_action_[0], prev_action_[1]);
+            if (horiz_mag > max_action_magnitude_ && horiz_mag > 1e-6) {
+                double scale = max_action_magnitude_ / horiz_mag;
+                prev_action_[0] *= scale;
+                prev_action_[1] *= scale;
+            }
+
+            // 2. Absolute Maximum Yaw Rotation Rate
+            prev_action_[2] = std::clamp(prev_action_[2], -max_yaw_rate_rad_, max_yaw_rate_rad_);
         }
         catch (const std::exception& e) {
             RCLCPP_ERROR(node_->get_logger(), "ONNX Inference step failed: %s", e.what());
@@ -1013,6 +1031,12 @@ public:
     bool getV7() const { return v7_; }
     void setEnableGate1_1(bool enable) { enable_gate_1_1_ = enable; }
     bool getEnableGate1_1() const { return enable_gate_1_1_; }
+    void setMaxActionMagnitude(double max_mag) { max_action_magnitude_ = std::clamp(max_mag, 1.0, 16.0); }
+    double getMaxActionMagnitude() const { return max_action_magnitude_; }
+    void setMaxYawRateRad(double max_yaw_rate) { max_yaw_rate_rad_ = std::clamp(max_yaw_rate, 20.0 * M_PI / 180.0, 360.0 * M_PI / 180.0); }
+    void setMaxYawRateDeg(double max_yaw_deg) { setMaxYawRateRad(max_yaw_deg * M_PI / 180.0); }
+    double getMaxYawRateRad() const { return max_yaw_rate_rad_; }
+    double getMaxYawRateDeg() const { return max_yaw_rate_rad_ * 180.0 / M_PI; }
     const std::array<double, 42>& getObservationVector() const { return observation_vector_; }
 
 private:
@@ -1049,6 +1073,8 @@ private:
     double a_max_{5.6638};
     bool v7_{false};
     bool enable_gate_1_1_{true};
+    double max_action_magnitude_{16.0};
+    double max_yaw_rate_rad_{2.0 * M_PI};
 
     double filtered_vx_{0.0};
     double filtered_vy_{0.0};

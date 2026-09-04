@@ -138,6 +138,8 @@ def generate_launch_description():
             'max_accel': 8.5,
             'v7': True,
             'enable_gate_1_1': True,
+            'max_action_magnitude': 16.0,
+            'max_yaw_rate_deg': 360.0,
         }],
     )
 
