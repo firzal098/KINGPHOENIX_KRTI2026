@@ -2,9 +2,10 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, TimerAction, RegisterEventHandler
+from launch.conditions import IfCondition
 from launch.event_handlers import OnShutdown
 from launch.launch_description_sources import AnyLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -35,8 +36,15 @@ def generate_launch_description():
 
     camera_pitch_deg_arg = DeclareLaunchArgument(
         'camera_pitch_deg',
-        default_value='0.0',
+        default_value='15.0',
         description='Camera mounting pitch angle in degrees (e.g. 15.0 for real drone up-tilt, 0.0 for level sim)'
+    )
+
+    estimation_method_arg = DeclareLaunchArgument(
+        'estimation_method',
+        default_value='pixel_innovation',
+        choices=['pixel_innovation', 'pnp'],
+        description='Gate estimation method: pixel_innovation (direct image-space EKF) or pnp (legacy 3D pose PnP)'
     )
 
     camera_node = Node(
@@ -106,12 +114,53 @@ def generate_launch_description():
         ]
     )
 
-    # FIXED: Changed 'association_max_dist' from int (10) to float (10.0)
+    use_pixel_ekf = PythonExpression(["'", LaunchConfiguration('estimation_method'), "' == 'pixel_innovation'"])
+    use_legacy_pnp = PythonExpression(["'", LaunchConfiguration('estimation_method'), "' == 'pnp'"])
+
+    # 1. Pixel Innovation Pipeline Nodes (Default)
+    gate_yolo_node = Node(
+        package='cuda_gate_inference',
+        executable='gate_yolo_node',
+        name='gate_yolo_node',
+        output='screen',
+        condition=IfCondition(use_pixel_ekf),
+        parameters=[{
+            'conf_threshold': 0.50,
+            'corner_conf_threshold': 0.15,
+            'gate_width_m': 1.9,
+            'gate_height_m': 2.0,
+            'publish_pnp_fallback': True,
+        }],
+    )
+
+    gate_estimator_node = Node(
+        package='cuda_gate_inference',
+        executable='gate_estimator_node',
+        name='gate_estimator_node',
+        output='screen',
+        condition=IfCondition(use_pixel_ekf),
+        parameters=[{
+            'estimation_method': 'pixel_innovation',
+            'gate_width_m': 1.9,
+            'gate_height_m': 2.0,
+            'sigma_pixel': 3.0,
+            'process_noise_q': 1e-4,
+            'p0_sigma': 2.0,
+            'camera_pitch_deg': LaunchConfiguration('camera_pitch_deg'),
+            'cond_h_max': 1000.0,
+            'max_innovation_px_sanity': 120.0,
+            'max_refine_distance_m': 36.0,
+            'v7': True,
+        }],
+    )
+
+    # 2. Legacy PnP Pipeline Nodes (Optional fallback)
     mavros_estimator_node = Node(
         package='mavros_controller',
         executable='mavros_gate_estimator',
         name='mavros_gate_estimator',
         output='screen',
+        condition=IfCondition(use_legacy_pnp),
         parameters=[{
             'pnp_vision_sigma':           2.0,
             'drone_pose_sigma':           1.0,
@@ -124,6 +173,18 @@ def generate_launch_description():
             'enable_gate3_pnp_refinement': True,
             'v7':                         True,
             'camera_pitch_deg':           LaunchConfiguration('camera_pitch_deg'),
+        }],
+    )
+
+    cuda_gate_inference_node = Node(
+        package='cuda_gate_inference',
+        executable='gate_perception',
+        name='cuda_gate_inference',
+        output='screen',
+        condition=IfCondition(use_legacy_pnp),
+        parameters=[{
+            'conf_threshold': 0.50,
+            'corner_conf_threshold': 0.15,
         }],
     )
 
@@ -141,17 +202,6 @@ def generate_launch_description():
             'max_action_magnitude': 16.0,
             'max_yaw_rate_deg': 360.0,
         }],
-    )
-
-    cuda_gate_inference_node = Node(
-        package='cuda_gate_inference',
-        executable='gate_perception',
-        name='cuda_gate_inference',
-        output='screen',
-        parameters=[{
-            'conf_threshold': 0.50,
-            'corner_conf_threshold': 0.15,
-    }],
     )
 
     rosbridge_websocket_node = Node(
@@ -204,10 +254,13 @@ def generate_launch_description():
         frame_id_arg,
         fov_arg,
         camera_pitch_deg_arg,
+        estimation_method_arg,
         camera_node,
         mavros_node,
         set_message_interval,
         set_stream_rate,
+        gate_yolo_node,
+        gate_estimator_node,
         mavros_estimator_node,
         cuda_gate_inference_node,
         controller_node,

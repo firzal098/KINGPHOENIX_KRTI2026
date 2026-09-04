@@ -26,6 +26,9 @@ setup(
     entry_points={
         'console_scripts': [
             'gate_perception = cuda_gate_inference:main',
+            'gate_yolo_node = cuda_gate_inference.gate_yolo_node:main',
+            'gate_estimator_node = cuda_gate_inference.gate_estimator_node:main',
+            'test_gate_projection = cuda_gate_inference.test_gate_projection:main',
         ],
     },
 )
