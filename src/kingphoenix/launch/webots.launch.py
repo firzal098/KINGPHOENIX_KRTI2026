@@ -39,6 +39,12 @@ def generate_launch_description():
         description='Camera mounting pitch angle in degrees (e.g. 15.0 for real drone up-tilt, 0.0 for level sim)'
     )
 
+    method_arg = DeclareLaunchArgument(
+        'method',
+        default_value='pnp',
+        description='Estimation method: "pnp" (Perspective-n-Point) or "pixel_innovation" (2D Pixel Innovation EKF)'
+    )
+
     camera_node = Node(
         package='webots_camera_front',
         executable='camera_publisher',
@@ -113,6 +119,7 @@ def generate_launch_description():
         name='mavros_gate_estimator',
         output='screen',
         parameters=[{
+            'method':                     LaunchConfiguration('method'),
             'pnp_vision_sigma':           2.0,
             'drone_pose_sigma':           1.0,
             'gate_prior_sigma':           4.0,
@@ -149,9 +156,10 @@ def generate_launch_description():
         name='cuda_gate_inference',
         output='screen',
         parameters=[{
-            'conf_threshold': 0.50,
+            'method':                LaunchConfiguration('method'),
+            'conf_threshold':        0.50,
             'corner_conf_threshold': 0.15,
-    }],
+        }],
     )
 
     rosbridge_websocket_node = Node(
@@ -204,6 +212,7 @@ def generate_launch_description():
         frame_id_arg,
         fov_arg,
         camera_pitch_deg_arg,
+        method_arg,
         camera_node,
         mavros_node,
         set_message_interval,

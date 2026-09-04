@@ -5,6 +5,7 @@
 #include <limits>
 #include <chrono>
 #include <random>
+#include <algorithm>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 
@@ -52,6 +53,8 @@ public:
       active_target_gate_idx_(0)
     {
         // Declare parameters with default values
+        this->declare_parameter<std::string>("method", "pnp"); // "pnp" or "pixel_innovation"
+        this->declare_parameter<double>("pixel_noise_sigma", 4.0);
         this->declare_parameter<double>("gate_prior_sigma", 1.5);
         this->declare_parameter<double>("drone_pose_sigma", 2.0);
         this->declare_parameter<double>("pnp_vision_sigma", 4.0);
@@ -73,7 +76,9 @@ public:
         this->declare_parameter<bool>("enable_gate3_pnp_refinement", true);
         this->declare_parameter<bool>("v7", false);
 
-        // Safe parameter reading (handles int or double from launch files without crashing)
+        // Safe parameter reading
+        method_                     = this->get_parameter("method").as_string();
+        pixel_noise_sigma_          = get_param_as_double("pixel_noise_sigma", 4.0);
         prior_sigma_                = get_param_as_double("gate_prior_sigma", 1.5);
         drone_sigma_                = get_param_as_double("drone_pose_sigma", 2.0);
         pnp_sigma_                  = get_param_as_double("pnp_vision_sigma", 4.0);
@@ -123,8 +128,8 @@ public:
 
         RCLCPP_INFO(
             this->get_logger(),
-            "Camera mounting pitch: %.1f deg (RDF to FLU rotation configured).",
-            camera_pitch_deg_
+            "Camera mounting pitch: %.1f deg (RDF to FLU rotation configured). Estimation Method: '%s'",
+            camera_pitch_deg_, method_.c_str()
         );
 
         auto sensor_qos = rclcpp::SensorDataQoS();
@@ -181,6 +186,11 @@ public:
             "/estimator/gate_markers", 10
         );
 
+        // Publisher for 3D-to-2D Projected Gate Memory Pixels (for FPV debug overlay)
+        pub_projected_pixels_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
+            "/estimator/projected_gate_pixels", 10
+        );
+
         // Publishers for Unrefined Initial Priors
         if (publish_initial_pos_) {
             pub_initial_poses_ = this->create_publisher<geometry_msgs::msg::PoseArray>(
@@ -205,8 +215,8 @@ public:
 
         RCLCPP_INFO(
             this->get_logger(),
-            "MAVROS Gate Estimator Node Initialized (Native C++ PnP + Monte-Carlo EKF active, Max Dist: %.1fm, Mahalanobis Sq: %.3f).",
-            max_dist_, mahalanobis_max_sq_
+            "MAVROS Gate Estimator Node Initialized (Method: %s, 30 Hz streaming).",
+            method_.c_str()
         );
     }
 
@@ -233,6 +243,9 @@ private:
         if (publish_initial_pos_) {
             publish_initial_poses(header);
         }
+
+        // Compute and publish 3D-to-2D projected gate memory pixels
+        compute_and_publish_projected_pixels();
     }
 
     void initialize_gate_priors() {
@@ -308,13 +321,13 @@ private:
             init_text.text = "Gate " + std::to_string(state.id) + " (Initial)";
             initial_markers_msg_.markers.push_back(init_text);
 
-            // Add Initial Sub-Gates for Gate 3 (v7: 2 sub-gates, default: 1 sub-gate) and Gate 4 (v7: 3 sub-gates, default: 2 sub-gates)
+            // Add Initial Sub-Gates for Gate 3 and Gate 4
             std::vector<double> sub_offsets;
             if (v7_) {
                 if (state.id == 3) {
-                    sub_offsets = {1.0, 2.5}; // v7: 3 gates total (Gate 3.1 at 1.0m, Gate 3.2 at 2.5m)
+                    sub_offsets = {1.0, 2.5};
                 } else if (state.id == 4) {
-                    sub_offsets = {1.0, 2.0, 3.0}; // v7: 4 sub-gates 1m distance each
+                    sub_offsets = {1.0, 2.0, 3.0};
                 }
             } else {
                 if (state.id == 3) {
@@ -405,6 +418,13 @@ private:
                 msg->k[3], msg->k[4], msg->k[5],
                 msg->k[6], msg->k[7], msg->k[8]);
             
+            fx_ = msg->k[0];
+            fy_ = msg->k[4];
+            cx_ = msg->k[2];
+            cy_ = msg->k[5];
+            img_w_ = msg->width > 0 ? static_cast<double>(msg->width) : (cx_ * 2.0);
+            img_h_ = msg->height > 0 ? static_cast<double>(msg->height) : (cy_ * 2.0);
+
             if (!msg->d.empty()) {
                 D_ = cv::Mat(msg->d).clone();
             } else {
@@ -413,10 +433,96 @@ private:
             camera_info_received_ = true;
             RCLCPP_INFO(
                 this->get_logger(),
-                "Camera intrinsics registered in Estimator: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
-                msg->k[0], msg->k[4], msg->k[2], msg->k[5]
+                "Camera intrinsics registered in Estimator: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f (Image: %.0fx%.0f)",
+                fx_, fy_, cx_, cy_, img_w_, img_h_
             );
         }
+    }
+
+    /**
+     * @brief Solves the exact 2D pixel coordinates of all gates currently stored in estimator memory.
+     * Accounts for full drone 6-DOF pose and camera tilt pitch (10 deg up causes gates to appear lower).
+     * Publishes 12 floats per visible gate on /estimator/projected_gate_pixels:
+     * [id, is_active, u_center, v_center, u_tl, v_tl, u_tr, v_tr, u_br, v_br, u_bl, v_bl]
+     */
+    void compute_and_publish_projected_pixels() {
+        if (!drone_pose_received_ || !camera_info_received_) {
+            return;
+        }
+
+        const Eigen::Matrix3d R_drone = latest_drone_rot_.toRotationMatrix();
+        const Eigen::Matrix3d R_total = R_drone * R_cam_to_body_; // RDF to World ENU
+        const Eigen::Matrix3d R_world_to_cam = R_total.transpose(); // World ENU to RDF
+
+        const double hw = gate_w_ / 2.0;
+        const double hh = gate_h_ / 2.0;
+        const Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
+
+        std::vector<double> projected_data;
+
+        for (size_t idx = 0; idx < gates_.size(); ++idx) {
+            const auto &gate = gates_[idx];
+            double is_active = (static_cast<int>(idx) == active_target_gate_idx_) ? 1.0 : 0.0;
+
+            // Gate coordinate axes in World ENU
+            Eigen::Vector3d r_gate = (gate.normal_enu.cross(up_enu)).normalized();
+            if (r_gate.norm() < 0.1) {
+                r_gate = Eigen::Vector3d(0.0, 1.0, 0.0);
+            }
+            Eigen::Vector3d u_gate = up_enu;
+
+            // 3D points: Center, TL (6), TR (7), BR (8), BL (9)
+            std::vector<Eigen::Vector3d> pts_3d = {
+                gate.position_enu,
+                gate.position_enu - hw * r_gate + hh * u_gate, // TL
+                gate.position_enu + hw * r_gate + hh * u_gate, // TR
+                gate.position_enu + hw * r_gate - hh * u_gate, // BR
+                gate.position_enu - hw * r_gate - hh * u_gate  // BL
+            };
+
+            // Transform Center to Camera RDF
+            Eigen::Vector3d p_cam_center = R_world_to_cam * (pts_3d[0] - latest_drone_pos_);
+            
+            // Check if gate center is in front of the camera (Z > 0.5m)
+            if (p_cam_center.z() <= 0.5) {
+                continue;
+            }
+
+            // Project all 5 points to 2D pixels (u, v)
+            std::vector<double> px_coords;
+            bool any_in_fov = false;
+
+            for (const auto &p_world : pts_3d) {
+                Eigen::Vector3d p_cam = R_world_to_cam * (p_world - latest_drone_pos_);
+                if (p_cam.z() <= 0.2) {
+                    px_coords.push_back(-999.0);
+                    px_coords.push_back(-999.0);
+                    continue;
+                }
+
+                double u = fx_ * (p_cam.x() / p_cam.z()) + cx_;
+                double v = fy_ * (p_cam.y() / p_cam.z()) + cy_;
+
+                px_coords.push_back(u);
+                px_coords.push_back(v);
+
+                // Margin check around image frame
+                if (u >= -150.0 && u <= (img_w_ + 150.0) && v >= -150.0 && v <= (img_h_ + 150.0)) {
+                    any_in_fov = true;
+                }
+            }
+
+            if (any_in_fov && px_coords.size() == 10) {
+                // Pack 12 floats per visible gate
+                projected_data.push_back(static_cast<double>(gate.id));
+                projected_data.push_back(is_active);
+                projected_data.insert(projected_data.end(), px_coords.begin(), px_coords.end());
+            }
+        }
+
+        std_msgs::msg::Float64MultiArray proj_msg;
+        proj_msg.data = projected_data;
+        pub_projected_pixels_->publish(proj_msg);
     }
 
     void gate_corners_2d_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
@@ -431,7 +537,7 @@ private:
         if (!camera_info_received_) {
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 2000,
-                "Waiting for /camera/camera_info before running PnP..."
+                "Waiting for /camera/camera_info before processing vision..."
             );
             return;
         }
@@ -460,17 +566,92 @@ private:
             return;
         }
 
-        // Special Rule: Skip direct PnP refinement for Gate 4 (idx 3);
-        // Gate 4 inherits the offset from the tunnel entrance.
+        // Special Rule: Skip direct refinement for Gate 4 (idx 3); inherits offset from tunnel entrance
         if (target_idx == 3) {
             return;
         }
 
         const Eigen::Matrix3d R_drone = latest_drone_rot_.toRotationMatrix();
-        const Eigen::Matrix3d R_total = R_drone * R_cam_to_body_;
-        const Eigen::Matrix3d R_drone_pos = Eigen::Matrix3d::Identity() * (drone_sigma_ * drone_sigma_);
+        const Eigen::Matrix3d R_total = R_drone * R_cam_to_body_; // RDF to ENU
+        const Eigen::Matrix3d R_world_to_cam = R_total.transpose(); // ENU to RDF
 
         size_t num_detections = msg->data.size() / 13;
+
+        // =========================================================================
+        // METHOD A: Pixel Innovation EKF (Direct 2D Image Domain Measurement Update)
+        // =========================================================================
+        if (method_ == "pixel_innovation") {
+            Eigen::Vector3d p_cam_pred = R_world_to_cam * (gates_[target_idx].position_enu - latest_drone_pos_);
+            if (p_cam_pred.z() <= 0.5) {
+                return;
+            }
+
+            double z_inv = 1.0 / p_cam_pred.z();
+            double z_inv2 = z_inv * z_inv;
+            double u_pred = fx_ * p_cam_pred.x() * z_inv + cx_;
+            double v_pred = fy_ * p_cam_pred.y() * z_inv + cy_;
+
+            // Find best matching detection based on 2D pixel distance to predicted center
+            int best_det_idx = -1;
+            double min_pix_dist = std::numeric_limits<double>::max();
+            Eigen::Vector2d best_z_center(0.0, 0.0);
+
+            for (size_t i = 0; i < num_detections; ++i) {
+                size_t off = i * 13;
+                double u0 = msg->data[off + 1], v0 = msg->data[off + 2];
+                double u1 = msg->data[off + 4], v1 = msg->data[off + 5];
+                double u2 = msg->data[off + 7], v2 = msg->data[off + 8];
+                double u3 = msg->data[off + 10], v3 = msg->data[off + 11];
+
+                double u_c = 0.25 * (u0 + u1 + u2 + u3);
+                double v_c = 0.25 * (v0 + v1 + v2 + v3);
+
+                double dist = std::hypot(u_c - u_pred, v_c - v_pred);
+                if (dist < min_pix_dist) {
+                    min_pix_dist = dist;
+                    best_det_idx = static_cast<int>(i);
+                    best_z_center << u_c, v_c;
+                }
+            }
+
+            // Pixel distance gating (maximum 180 pixels innovation window)
+            if (best_det_idx != -1 && min_pix_dist < 180.0) {
+                // Measurement Jacobian H = d(h)/d(p_cam) * R_world_to_cam (2x3)
+                Eigen::Matrix<double, 2, 3> dh_dpc;
+                dh_dpc << fx_ * z_inv, 0.0, -fx_ * p_cam_pred.x() * z_inv2,
+                          0.0, fy_ * z_inv, -fy_ * p_cam_pred.y() * z_inv2;
+
+                Eigen::Matrix<double, 2, 3> H = dh_dpc * R_world_to_cam;
+
+                // 2D Pixel Innovation: y = z_meas - h(x_hat)
+                Eigen::Vector2d y_innov = best_z_center - Eigen::Vector2d(u_pred, v_pred);
+
+                // Pixel Measurement Covariance
+                Eigen::Matrix2d R_pix = Eigen::Matrix2d::Identity() * (pixel_noise_sigma_ * pixel_noise_sigma_);
+
+                // Innovation Covariance S = H * P * H^T + R
+                Eigen::Matrix2d S = H * gates_[target_idx].covariance * H.transpose() + R_pix;
+
+                // Kalman Gain K = P * H^T * S^-1 (3x2)
+                Eigen::Matrix<double, 3, 2> K = gates_[target_idx].covariance * H.transpose() * S.inverse();
+
+                // State & Covariance Update
+                gates_[target_idx].position_enu += K * y_innov;
+                gates_[target_idx].covariance = (Eigen::Matrix3d::Identity() - K * H) * gates_[target_idx].covariance;
+
+                // Anti-drift prior clamp
+                clamp_gate_position(gates_[target_idx]);
+
+                // Propagate offset downstream
+                propagate_offsets(target_idx);
+            }
+            return;
+        }
+
+        // =========================================================================
+        // METHOD B: 3D Perspective-n-Point (IPPE + Monte-Carlo Covariance)
+        // =========================================================================
+        const Eigen::Matrix3d R_drone_pos = Eigen::Matrix3d::Identity() * (drone_sigma_ * drone_sigma_);
         int best_pnp_idx = -1;
         double min_mahalanobis_sq = std::numeric_limits<double>::max();
         Eigen::Vector3d best_z_meas = Eigen::Vector3d::Zero();
@@ -481,15 +662,10 @@ private:
 
         for (size_t i = 0; i < num_detections; ++i) {
             size_t off = i * 13;
-            // score = msg->data[off + 0];
-            double u0 = msg->data[off + 1];
-            double v0 = msg->data[off + 2];
-            double u1 = msg->data[off + 4];
-            double v1 = msg->data[off + 5];
-            double u2 = msg->data[off + 7];
-            double v2 = msg->data[off + 8];
-            double u3 = msg->data[off + 10];
-            double v3 = msg->data[off + 11];
+            double u0 = msg->data[off + 1], v0 = msg->data[off + 2];
+            double u1 = msg->data[off + 4], v1 = msg->data[off + 5];
+            double u2 = msg->data[off + 7], v2 = msg->data[off + 8];
+            double u3 = msg->data[off + 10], v3 = msg->data[off + 11];
 
             std::vector<cv::Point2f> image_points = {
                 cv::Point2f(static_cast<float>(u0), static_cast<float>(v0)),
@@ -525,12 +701,11 @@ private:
             Eigen::Vector3d p_pnp_rdf(tx, ty, tz);
             double dist_to_cam = p_pnp_rdf.norm();
 
-            // 3. Distance Gating: Skip detections beyond max_refine_dist_ (depth noise is too high)
             if (dist_to_cam > max_refine_dist_) {
                 continue;
             }
 
-            // High-Speed C++ Monte-Carlo Corner Perturbation for 3x3 Measurement Covariance (R_pnp_cam)
+            // Fast C++ Monte-Carlo Covariance
             Eigen::Matrix3d R_pnp_cam = Eigen::Matrix3d::Identity();
             if (enable_mc_cov_) {
                 std::vector<Eigen::Vector3d> sampled_translations;
@@ -560,7 +735,6 @@ private:
                     Eigen::Vector3d mean = samples.colwise().mean();
                     Eigen::MatrixXd centered = samples.rowwise() - mean.transpose();
                     R_pnp_cam = (centered.transpose() * centered) / static_cast<double>(sampled_translations.size() - 1);
-                    // Regularization floor (0.05m)^2
                     R_pnp_cam += Eigen::Matrix3d::Identity() * 0.0025;
                 } else {
                     double sig = (dist_to_cam > 20.0) ? 8.0 : (1.5 + (dist_to_cam / 20.0) * 6.5);
@@ -580,10 +754,8 @@ private:
             const Eigen::Matrix3d R_pnp_world = R_total * R_pnp_cam * R_total.transpose();
             const Eigen::Matrix3d R_meas = R_pnp_world + R_drone_pos;
 
-            // Global measured gate position in ENU frame
             Eigen::Vector3d z_meas = latest_drone_pos_ + (R_total * p_pnp_rdf);
 
-            // Associate strictly against active target gate
             Eigen::Vector3d y = z_meas - gates_[target_idx].position_enu;
             Eigen::Matrix3d S = gates_[target_idx].covariance + R_meas;
 
@@ -605,19 +777,11 @@ private:
     }
 
     void pnp_poses_callback(const geometry_msgs::msg::PoseArray::SharedPtr msg) {
-        if (!drone_pose_received_) {
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), 2000,
-                "Waiting for /mavros/local_position/pose before processing PnP gate measurements..."
-            );
+        if (!drone_pose_received_ || msg->poses.empty()) {
             return;
         }
 
-        if (msg->poses.empty()) {
-            return;
-        }
-
-        // 1. Attitude Gating
+        // Attitude Gating
         double qw = latest_drone_rot_.w();
         double qx = latest_drone_rot_.x();
         double qy = latest_drone_rot_.y();
@@ -631,13 +795,8 @@ private:
             return;
         }
 
-        // 2. Target Gate Isolation
         int target_idx = active_target_gate_idx_;
-        if (target_idx < 0 || target_idx >= static_cast<int>(gates_.size())) {
-            return;
-        }
-
-        if (target_idx == 3) {
+        if (target_idx < 0 || target_idx >= static_cast<int>(gates_.size()) || target_idx == 3) {
             return;
         }
 
@@ -702,7 +861,7 @@ private:
 
     void apply_gate_update(int target_idx, const Eigen::Vector3d &best_z_meas, const Eigen::Matrix3d &best_R_meas, double min_mahalanobis_sq) {
         if (target_idx == 4 && blend_gate5_with_mean_1_2_) {
-            // When targeting Gate 5 and blend is enabled, blend raw PnP offset (60%) with Gate 2 offset (40%)
+            // Target Gate 5: blend raw PnP offset (60%) with Gate 2 offset (40%)
             Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
             Eigen::Vector3d offset_5_raw = best_z_meas - gates_[4].prior_pos_enu;
 
@@ -711,32 +870,27 @@ private:
 
             update_gate_kalman(gates_[4], z_meas_blended, best_R_meas, min_mahalanobis_sq);
         } else if (target_idx == 2) {
-            // When targeting Gate 3, blend 50% Gate 3 PnP measurement with 50% upstream Gate 1/2 mean offset across full horizontal plane (X and Y)
+            // Target Gate 3: blend 50% Gate 3 PnP with 50% upstream Gate 1/2 mean offset
             Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
             Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
             Eigen::Vector3d raw_offset_1_2 = tunnel_blend_gate1_and_2_ ? (0.5 * (offset_1 + offset_2)) : offset_2;
 
-            // 2D Full Horizontal Offset (X, Y) from Gate 1 and 2
             Eigen::Vector3d offset_1_2_horiz(raw_offset_1_2.x(), raw_offset_1_2.y(), 0.0);
-
-            // 2D Full Horizontal Offset (X, Y) from Gate 3 PnP
             Eigen::Vector3d offset_3_pnp_raw = best_z_meas - gates_[2].prior_pos_enu;
             Eigen::Vector3d offset_3_pnp_horiz(offset_3_pnp_raw.x(), offset_3_pnp_raw.y(), 0.0);
 
-            // 50% Gate 1/2 horizontal shift + 50% Gate 3 PnP horizontal shift
             Eigen::Vector3d blended_horiz = 0.50 * offset_1_2_horiz + 0.50 * offset_3_pnp_horiz;
             Eigen::Vector3d z_meas_gate3 = gates_[2].prior_pos_enu + blended_horiz;
-            z_meas_gate3.z() = best_z_meas.z(); // Keep vertical height from PnP
+            z_meas_gate3.z() = best_z_meas.z();
 
             update_gate_kalman(gates_[2], z_meas_gate3, best_R_meas, min_mahalanobis_sq);
 
-            // Synchronize Gate 4 to maintain the exact same total world-space offset as Gate 3
+            // Synchronize Gate 4 offset to match Gate 3
             Eigen::Vector3d total_offset_3 = gates_[2].position_enu - gates_[2].prior_pos_enu;
             if (gates_.size() > 3) {
                 gates_[3].position_enu = gates_[3].prior_pos_enu + total_offset_3;
             }
         } else if (target_idx == 1) {
-            // When targeting Gate 2, refine Gate 2 directly using its own PnP measurements (inheriting Gate 1's position as prior)
             Eigen::Vector3d z_meas_2;
             if (use_1d_right_axis_offset_) {
                 const Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
@@ -753,7 +907,10 @@ private:
             update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
         }
 
-        // When Gate 1 or Gate 2 is refined, propagate full 2D horizontal correction offset to downstream gates
+        propagate_offsets(target_idx);
+    }
+
+    void propagate_offsets(int target_idx) {
         if (target_idx == 0 || target_idx == 1) {
             Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
             Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
@@ -787,7 +944,24 @@ private:
                     gates_[4].position_enu = gates_[4].prior_pos_enu + 0.40 * offset_to_apply;
                 }
             }
+        } else if (target_idx == 2) {
+            // Synchronize Gate 4 to maintain the exact same total world-space offset as Gate 3
+            if (gates_.size() > 3) {
+                Eigen::Vector3d total_offset_3 = gates_[2].position_enu - gates_[2].prior_pos_enu;
+                gates_[3].position_enu = gates_[3].prior_pos_enu + total_offset_3;
+            }
         }
+    }
+
+    void clamp_gate_position(GateState &gate) {
+        Eigen::Vector3d dev = gate.position_enu - gate.prior_pos_enu;
+        double horiz_dev = std::hypot(dev.x(), dev.y());
+        if (horiz_dev > max_prior_deviation_) {
+            double scale = max_prior_deviation_ / horiz_dev;
+            gate.position_enu.x() = gate.prior_pos_enu.x() + dev.x() * scale;
+            gate.position_enu.y() = gate.prior_pos_enu.y() + dev.y() * scale;
+        }
+        gate.position_enu.z() = std::clamp(gate.position_enu.z(), gate.prior_pos_enu.z() - 0.35, gate.prior_pos_enu.z() + 0.35);
     }
 
     void update_gate_kalman(GateState &gate, const Eigen::Vector3d &z_meas, const Eigen::Matrix3d &R_meas, [[maybe_unused]] double mahalanobis_sq) {
@@ -798,17 +972,7 @@ private:
         gate.position_enu += K * y;
         gate.covariance = (Eigen::Matrix3d::Identity() - K) * gate.covariance;
 
-        // Anti-Drift Prior Anchor Clamping: Prevent the gate from wandering more than max_prior_deviation_ from surveyed prior
-        Eigen::Vector3d dev = gate.position_enu - gate.prior_pos_enu;
-        double horiz_dev = std::hypot(dev.x(), dev.y());
-        if (horiz_dev > max_prior_deviation_) {
-            double scale = max_prior_deviation_ / horiz_dev;
-            gate.position_enu.x() = gate.prior_pos_enu.x() + dev.x() * scale;
-            gate.position_enu.y() = gate.prior_pos_enu.y() + dev.y() * scale;
-        }
-
-        // Tightly clamp vertical Z (gate center nominal height is fixed)
-        gate.position_enu.z() = std::clamp(gate.position_enu.z(), gate.prior_pos_enu.z() - 0.35, gate.prior_pos_enu.z() + 0.35);
+        clamp_gate_position(gate);
     }
 
     void publish_refined_poses(const std_msgs::msg::Header &header) {
@@ -892,13 +1056,13 @@ private:
             text.text = "Gate " + std::to_string(gate.id);
             array.markers.push_back(text);
 
-            // Add Refined Sub-Gates for Gate 3 (v7: 2 sub-gates, default: 1 sub-gate) and Gate 4 (v7: 3 sub-gates, default: 2 sub-gates)
+            // Add Refined Sub-Gates for Gate 3 and Gate 4
             std::vector<double> sub_offsets;
             if (v7_) {
                 if (gate.id == 3) {
-                    sub_offsets = {1.0, 2.0}; // v7: 3 gates total with 1m distance each (0m, 1m, 2m)
+                    sub_offsets = {1.0, 2.0};
                 } else if (gate.id == 4) {
-                    sub_offsets = {1.0, 2.0, 3.0}; // v7: 4 sub-gates 1m distance each
+                    sub_offsets = {1.0, 2.0, 3.0};
                 }
             } else {
                 if (gate.id == 3) {
@@ -938,6 +1102,8 @@ private:
     }
 
     // Parameters
+    std::string method_{"pnp"};
+    double pixel_noise_sigma_{4.0};
     double prior_sigma_;
     double drone_sigma_;
     double pnp_sigma_;
@@ -977,6 +1143,12 @@ private:
     bool camera_info_received_{false};
     cv::Mat K_;
     cv::Mat D_;
+    double fx_{0.0};
+    double fy_{0.0};
+    double cx_{0.0};
+    double cy_{0.0};
+    double img_w_{640.0};
+    double img_h_{640.0};
     std::vector<cv::Point3f> object_points_4p_;
 
     // ROS 2 Comms
@@ -988,6 +1160,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr sub_target_gate_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_refined_poses_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_markers_;
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pub_projected_pixels_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_initial_poses_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_initial_markers_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_gates_;

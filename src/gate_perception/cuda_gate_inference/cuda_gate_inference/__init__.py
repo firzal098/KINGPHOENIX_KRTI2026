@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-ROS 2 Jazzy Gate Perception Node (Pure 2D YOLO Inference)
+ROS 2 Jazzy Gate Perception Node (Pure 2D YOLO Inference + Gate Memory Projection Overlay)
 Subscribes to camera images, executes ONNX YOLOv8 keypoint detection on CUDA/CPU,
-extracts 2D gate corner keypoints, and publishes 2D pixel coordinates for the downstream C++ estimator.
+publishes 2D gate corner pixels for the C++ estimator, and renders live FPV debug images
+with half-transparent YOLO detections and projected 3D gate memory positions.
 """
 
 import os
@@ -75,16 +76,20 @@ class GatePerceptionNode(Node):
             get_package_share_directory('cuda_gate_inference'), 'resource', 'gate_keypoints.onnx'
         )
         self.declare_parameter('model_path', _default_model)
+        self.declare_parameter('method', 'pnp') # 'pnp' or 'pixel_innovation'
         self.declare_parameter('conf_threshold', 0.50)
         self.declare_parameter('corner_conf_threshold', 0.15)
         self.declare_parameter('iou_threshold', 0.45)
         self.declare_parameter('publish_debug_image', True)
 
         self.model_path = str(self.get_parameter('model_path').value)
+        self.method = str(self.get_parameter('method').value)
         self.conf_threshold = float(self.get_parameter('conf_threshold').value)
         self.corner_conf_thresh = float(self.get_parameter('corner_conf_threshold').value)
         self.iou_threshold = float(self.get_parameter('iou_threshold').value)
         self.publish_debug = bool(self.get_parameter('publish_debug_image').value)
+
+        self.latest_projected_pixels = []
 
         self.init_onnx_session()
 
@@ -96,6 +101,11 @@ class GatePerceptionNode(Node):
 
         self.sub_image = self.create_subscription(
             Image, '/camera/image_raw', self.image_callback, qos_profile
+        )
+
+        # Subscribe to 3D-to-2D projected gate memory pixels from C++ Estimator
+        self.sub_projected_pixels = self.create_subscription(
+            Float64MultiArray, '/estimator/projected_gate_pixels', self.projected_pixels_callback, 10
         )
 
         # 2D Keypoint publisher for downstream C++ Estimator
@@ -119,7 +129,9 @@ class GatePerceptionNode(Node):
                 CompressedImage, '/perception/debug_image/compressed', 10
             )
 
-        self.get_logger().info(f"Gate YOLO Perception Node initialized using ONNX model: {self.model_path}")
+        self.get_logger().info(
+            f"Gate YOLO Perception Node initialized (Method: '{self.method}', Model: {self.model_path})"
+        )
 
     def init_onnx_session(self):
         if not os.path.exists(self.model_path):
@@ -140,6 +152,10 @@ class GatePerceptionNode(Node):
             self.get_logger().error(f"Failed to initialize ONNX session: {str(e)}")
             self.ort_session = None
 
+    def projected_pixels_callback(self, msg: Float64MultiArray):
+        if msg and len(msg.data) > 0:
+            self.latest_projected_pixels = list(msg.data)
+
     def image_callback(self, msg: Image):
         if self.ort_session is None:
             return
@@ -159,7 +175,7 @@ class GatePerceptionNode(Node):
         x_scale = orig_w / 640.0
         y_scale = orig_h / 640.0
 
-        # Fast C++ preprocessing via cv2.dnn.blobFromImage (resizes, swaps RB to RGB, scales by 1/255, NCHW format)
+        # Fast preprocessing via cv2.dnn.blobFromImage (resizes, swaps RB to RGB, scales by 1/255, NCHW format)
         input_tensor = cv2.dnn.blobFromImage(
             frame,
             scalefactor=1.0 / 255.0,
@@ -263,20 +279,87 @@ class GatePerceptionNode(Node):
 
     def publish_debug_overlay(self, frame, detections, header, publish_raw=True, publish_compressed=True):
         vis_img = frame.copy()
-        for det in detections:
-            cx, cy, w, h = det['bbox']
-            x1, y1 = int(cx - w / 2), int(cy - h / 2)
-            x2, y2 = int(cx + w / 2), int(cy + h / 2)
 
-            cv2.rectangle(vis_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(vis_img, f"Gate: {det['score']:.2f}", (x1, max(15, y1 - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        # 1. Render YOLO Detections (Solid for PnP, Half-Transparent for Pixel Innovation)
+        if len(detections) > 0:
+            if self.method == 'pixel_innovation':
+                overlay = vis_img.copy()
+                for det in detections:
+                    cx, cy, w, h = det['bbox']
+                    x1, y1 = int(cx - w / 2), int(cy - h / 2)
+                    x2, y2 = int(cx + w / 2), int(cy + h / 2)
 
-            for i in range(len(det['kp_x'])):
-                kx, ky, vis = int(det['kp_x'][i]), int(det['kp_y'][i]), det['kp_vis'][i]
-                if vis >= self.corner_conf_thresh:
-                    color = (0, 0, 255) if 6 <= i <= 9 else (255, 250, 0)
-                    cv2.circle(vis_img, (kx, ky), 4, color, -1)
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(overlay, f"Gate YOLO: {det['score']:.2f}", (x1, max(15, y1 - 6)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+
+                    for i in range(len(det['kp_x'])):
+                        kx, ky, vis = int(det['kp_x'][i]), int(det['kp_y'][i]), det['kp_vis'][i]
+                        if vis >= self.corner_conf_thresh:
+                            color = (0, 0, 255) if 6 <= i <= 9 else (255, 250, 0)
+                            cv2.circle(overlay, (kx, ky), 4, color, -1)
+                # Alpha blend overlay layer at 40% opacity
+                cv2.addWeighted(overlay, 0.40, vis_img, 0.60, 0, vis_img)
+            else:
+                for det in detections:
+                    cx, cy, w, h = det['bbox']
+                    x1, y1 = int(cx - w / 2), int(cy - h / 2)
+                    x2, y2 = int(cx + w / 2), int(cy + h / 2)
+
+                    cv2.rectangle(vis_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(vis_img, f"Gate: {det['score']:.2f}", (x1, max(15, y1 - 6)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                    for i in range(len(det['kp_x'])):
+                        kx, ky, vis = int(det['kp_x'][i]), int(det['kp_y'][i]), det['kp_vis'][i]
+                        if vis >= self.corner_conf_thresh:
+                            color = (0, 0, 255) if 6 <= i <= 9 else (255, 250, 0)
+                            cv2.circle(vis_img, (kx, ky), 4, color, -1)
+
+        # 2. Render 3D-to-2D Projected Gate Positions from Estimator Memory
+        # Format per visible gate (12 floats): [id, is_active, u_c, v_c, u_tl, v_tl, u_tr, v_tr, u_br, v_br, u_bl, v_bl]
+        if len(self.latest_projected_pixels) >= 12 and (len(self.latest_projected_pixels) % 12 == 0):
+            num_mem_gates = len(self.latest_projected_pixels) // 12
+            for g in range(num_mem_gates):
+                off = g * 12
+                gate_id = int(self.latest_projected_pixels[off + 0])
+                is_active = bool(self.latest_projected_pixels[off + 1] > 0.5)
+                u_c, v_c = self.latest_projected_pixels[off + 2], self.latest_projected_pixels[off + 3]
+                u_tl, v_tl = self.latest_projected_pixels[off + 4], self.latest_projected_pixels[off + 5]
+                u_tr, v_tr = self.latest_projected_pixels[off + 6], self.latest_projected_pixels[off + 7]
+                u_br, v_br = self.latest_projected_pixels[off + 8], self.latest_projected_pixels[off + 9]
+                u_bl, v_bl = self.latest_projected_pixels[off + 10], self.latest_projected_pixels[off + 11]
+
+                # Active target gate is bright Cyan (255, 255, 0), other gates are Orange (0, 165, 255)
+                color_box = (255, 255, 0) if is_active else (0, 165, 255)
+                thickness = 2 if is_active else 1
+
+                corners = [(u_tl, v_tl), (u_tr, v_tr), (u_br, v_br), (u_bl, v_bl)]
+                valid_pts = []
+                for pt in corners:
+                    if pt[0] > -500 and pt[1] > -500:
+                        valid_pts.append((int(pt[0]), int(pt[1])))
+
+                # Draw projected 3D wireframe box
+                if len(valid_pts) == 4:
+                    pts_arr = np.array(valid_pts, np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(vis_img, [pts_arr], isClosed=True, color=color_box, thickness=thickness)
+
+                # Draw projected corner dots
+                for pt in valid_pts:
+                    cv2.circle(vis_img, pt, 4, color_box, -1)
+                    cv2.circle(vis_img, pt, 5, (0, 0, 0), 1)
+
+                # Draw projected center crosshair and label
+                if u_c > -500 and v_c > -500:
+                    cx_i, cy_i = int(u_c), int(v_c)
+                    cv2.circle(vis_img, (cx_i, cy_i), 4, (0, 255, 255) if is_active else color_box, -1)
+                    cv2.drawMarker(vis_img, (cx_i, cy_i), color_box, markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
+
+                    tag = f"Gate {gate_id} [Target Mem]" if is_active else f"Gate {gate_id} [Mem]"
+                    label_y = max(18, (valid_pts[0][1] - 6) if len(valid_pts) > 0 else (cy_i - 8))
+                    label_x = max(10, (valid_pts[0][0]) if len(valid_pts) > 0 else (cx_i - 20))
+                    cv2.putText(vis_img, tag, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color_box, 1)
 
         # 1. Raw Image
         if publish_raw:
