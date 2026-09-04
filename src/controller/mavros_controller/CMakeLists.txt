@@ -28,6 +28,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 # Find Eigen3
 find_package(Eigen3 REQUIRED)
 
+# Find OpenCV
+find_package(OpenCV REQUIRED)
+
 # Find ONNX Runtime (checks standard system paths /usr/include, /usr/local/include)
 find_path(ONNXRUNTIME_INCLUDE_DIR
   NAMES onnxruntime_cxx_api.h
@@ -51,6 +54,7 @@ target_include_directories(mavros_gate_estimator PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${EIGEN3_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
 )
 
 ament_target_dependencies(mavros_gate_estimator
@@ -64,6 +68,10 @@ ament_target_dependencies(mavros_gate_estimator
   tf2_ros
   tf2_geometry_msgs
   visualization_msgs
+)
+
+target_link_libraries(mavros_gate_estimator
+  ${OpenCV_LIBS}
 )
 
 # ==========================================

@@ -4,12 +4,18 @@
 #include <cmath>
 #include <limits>
 #include <chrono>
+#include <random>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
+
+#include <opencv2/core.hpp>
+#include <opencv2/calib3d.hpp>
+#include <opencv2/core/eigen.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose.hpp>
@@ -42,9 +48,10 @@ public:
     : Node("mavros_gate_estimator"), 
       drone_pose_received_(false), 
       initial_pose_captured_(false),
+      camera_info_received_(false),
       active_target_gate_idx_(0)
     {
-        // Declare parameters with default double values
+        // Declare parameters with default values
         this->declare_parameter<double>("gate_prior_sigma", 1.5);
         this->declare_parameter<double>("drone_pose_sigma", 2.0);
         this->declare_parameter<double>("pnp_vision_sigma", 4.0);
@@ -54,6 +61,11 @@ public:
         this->declare_parameter<double>("max_refine_tilt_deg", 18.0);
         this->declare_parameter<double>("max_refine_distance_m", 36.0);
         this->declare_parameter<double>("camera_pitch_deg", 0.0);
+        this->declare_parameter<double>("gate_width_m", 1.9);
+        this->declare_parameter<double>("gate_height_m", 2.0);
+        this->declare_parameter<bool>("enable_monte_carlo_cov", true);
+        this->declare_parameter<int>("mc_samples", 20);
+        this->declare_parameter<double>("corner_noise_sigma", 2.0);
         this->declare_parameter<bool>("publish_initial_pos", true);
         this->declare_parameter<bool>("blend_gate5_with_mean_1_2", true);
         this->declare_parameter<bool>("tunnel_blend_gate1_and_2", true);
@@ -71,12 +83,27 @@ public:
         max_tilt_rad_               = get_param_as_double("max_refine_tilt_deg", 18.0) * (M_PI / 180.0);
         max_refine_dist_            = get_param_as_double("max_refine_distance_m", 36.0);
         camera_pitch_deg_           = get_param_as_double("camera_pitch_deg", 0.0);
+        gate_w_                     = get_param_as_double("gate_width_m", 1.9);
+        gate_h_                     = get_param_as_double("gate_height_m", 2.0);
+        enable_mc_cov_              = this->get_parameter("enable_monte_carlo_cov").as_bool();
+        mc_samples_                 = static_cast<int>(this->get_parameter("mc_samples").as_int());
+        corner_noise_sigma_         = get_param_as_double("corner_noise_sigma", 2.0);
         publish_initial_pos_        = this->get_parameter("publish_initial_pos").as_bool();
         blend_gate5_with_mean_1_2_  = this->get_parameter("blend_gate5_with_mean_1_2").as_bool();
         tunnel_blend_gate1_and_2_   = this->get_parameter("tunnel_blend_gate1_and_2").as_bool();
         use_1d_right_axis_offset_   = this->get_parameter("use_1d_right_axis_offset").as_bool();
         enable_gate3_pnp_refinement_= this->get_parameter("enable_gate3_pnp_refinement").as_bool();
         v7_                         = this->get_parameter("v7").as_bool();
+
+        // 3D object model corner points (Top-Left, Top-Right, Bottom-Right, Bottom-Left)
+        float hw = static_cast<float>(gate_w_ / 2.0);
+        float hh = static_cast<float>(gate_h_ / 2.0);
+        object_points_4p_ = {
+            cv::Point3f(-hw, -hh, 0.0f), // Corner 6 (Top-Left)
+            cv::Point3f( hw, -hh, 0.0f), // Corner 7 (Top-Right)
+            cv::Point3f( hw,  hh, 0.0f), // Corner 8 (Bottom-Right)
+            cv::Point3f(-hw,  hh, 0.0f)  // Corner 9 (Bottom-Left)
+        };
 
         // Initialize zero offset defaults until first MAVROS pose is received
         initial_drone_pos_ = Eigen::Vector3d::Zero();
@@ -108,6 +135,18 @@ public:
             std::bind(&MavrosGateEstimator::drone_pose_callback, this, std::placeholders::_1)
         );
 
+        sub_camera_info_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
+            "/camera/camera_info", 10,
+            std::bind(&MavrosGateEstimator::camera_info_callback, this, std::placeholders::_1)
+        );
+
+        // 2D Gate Keypoint Corners Subscriber from cuda_gate_inference
+        sub_gate_corners_2d_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
+            "/perception/gate_corners_2d", sensor_qos,
+            std::bind(&MavrosGateEstimator::gate_corners_2d_callback, this, std::placeholders::_1)
+        );
+
+        // Direct 3D PnP Pose Subscriber (backward compatibility)
         sub_pnp_poses_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
             "/perception/gate_poses_3d", sensor_qos,
             std::bind(&MavrosGateEstimator::pnp_poses_callback, this, std::placeholders::_1)
@@ -166,7 +205,7 @@ public:
 
         RCLCPP_INFO(
             this->get_logger(),
-            "MAVROS Gate Estimator Node Initialized (30 Hz streaming, Max Dist: %.1fm, Mahalanobis Sq: %.3f).",
+            "MAVROS Gate Estimator Node Initialized (Native C++ PnP + Monte-Carlo EKF active, Max Dist: %.1fm, Mahalanobis Sq: %.3f).",
             max_dist_, mahalanobis_max_sq_
         );
     }
@@ -359,16 +398,45 @@ private:
         }
     }
 
-    void pnp_poses_callback(const geometry_msgs::msg::PoseArray::SharedPtr msg) {
+    void camera_info_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
+        if (!camera_info_received_) {
+            K_ = (cv::Mat_<double>(3, 3) <<
+                msg->k[0], msg->k[1], msg->k[2],
+                msg->k[3], msg->k[4], msg->k[5],
+                msg->k[6], msg->k[7], msg->k[8]);
+            
+            if (!msg->d.empty()) {
+                D_ = cv::Mat(msg->d).clone();
+            } else {
+                D_ = cv::Mat::zeros(5, 1, CV_64F);
+            }
+            camera_info_received_ = true;
+            RCLCPP_INFO(
+                this->get_logger(),
+                "Camera intrinsics registered in Estimator: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
+                msg->k[0], msg->k[4], msg->k[2], msg->k[5]
+            );
+        }
+    }
+
+    void gate_corners_2d_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
         if (!drone_pose_received_) {
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 2000,
-                "Waiting for /mavros/local_position/pose before processing PnP gate measurements..."
+                "Waiting for /mavros/local_position/pose before processing 2D gate measurements..."
             );
             return;
         }
 
-        if (msg->poses.empty()) {
+        if (!camera_info_received_) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "Waiting for /camera/camera_info before running PnP..."
+            );
+            return;
+        }
+
+        if (msg->data.empty() || (msg->data.size() % 13 != 0)) {
             return;
         }
 
@@ -402,15 +470,59 @@ private:
         const Eigen::Matrix3d R_total = R_drone * R_cam_to_body_;
         const Eigen::Matrix3d R_drone_pos = Eigen::Matrix3d::Identity() * (drone_sigma_ * drone_sigma_);
 
-        // Find the best matching PnP measurement for ONLY the active target gate
+        size_t num_detections = msg->data.size() / 13;
         int best_pnp_idx = -1;
         double min_mahalanobis_sq = std::numeric_limits<double>::max();
         Eigen::Vector3d best_z_meas = Eigen::Vector3d::Zero();
         Eigen::Matrix3d best_R_meas = Eigen::Matrix3d::Identity();
 
-        for (size_t i = 0; i < msg->poses.size(); ++i) {
-            const auto &pnp_pose = msg->poses[i];
-            Eigen::Vector3d p_pnp_rdf(pnp_pose.position.x, pnp_pose.position.y, pnp_pose.position.z);
+        std::mt19937 rng(1337);
+        std::normal_distribution<double> noise_dist(0.0, corner_noise_sigma_);
+
+        for (size_t i = 0; i < num_detections; ++i) {
+            size_t off = i * 13;
+            // score = msg->data[off + 0];
+            double u0 = msg->data[off + 1];
+            double v0 = msg->data[off + 2];
+            double u1 = msg->data[off + 4];
+            double v1 = msg->data[off + 5];
+            double u2 = msg->data[off + 7];
+            double v2 = msg->data[off + 8];
+            double u3 = msg->data[off + 10];
+            double v3 = msg->data[off + 11];
+
+            std::vector<cv::Point2f> image_points = {
+                cv::Point2f(static_cast<float>(u0), static_cast<float>(v0)),
+                cv::Point2f(static_cast<float>(u1), static_cast<float>(v1)),
+                cv::Point2f(static_cast<float>(u2), static_cast<float>(v2)),
+                cv::Point2f(static_cast<float>(u3), static_cast<float>(v3))
+            };
+
+            cv::Mat rvec, tvec;
+            bool success = cv::solvePnP(
+                object_points_4p_,
+                image_points,
+                K_,
+                D_,
+                rvec,
+                tvec,
+                false,
+                cv::SOLVEPNP_IPPE
+            );
+
+            if (!success || tvec.empty()) {
+                continue;
+            }
+
+            double tx = tvec.at<double>(0);
+            double ty = tvec.at<double>(1);
+            double tz = tvec.at<double>(2);
+
+            if (tz <= 0.3) {
+                continue;
+            }
+
+            Eigen::Vector3d p_pnp_rdf(tx, ty, tz);
             double dist_to_cam = p_pnp_rdf.norm();
 
             // 3. Distance Gating: Skip detections beyond max_refine_dist_ (depth noise is too high)
@@ -418,23 +530,49 @@ private:
                 continue;
             }
 
-            // Extract directional 3x3 Measurement Covariance R_pnp_cam from Swift Monte-Carlo sampling (if available)
+            // High-Speed C++ Monte-Carlo Corner Perturbation for 3x3 Measurement Covariance (R_pnp_cam)
             Eigen::Matrix3d R_pnp_cam = Eigen::Matrix3d::Identity();
-            if (has_pnp_covariances_ && latest_pnp_covariances_.data.size() >= (i + 1) * 9) {
-                size_t off = i * 9;
-                R_pnp_cam << latest_pnp_covariances_.data[off + 0], latest_pnp_covariances_.data[off + 1], latest_pnp_covariances_.data[off + 2],
-                             latest_pnp_covariances_.data[off + 3], latest_pnp_covariances_.data[off + 4], latest_pnp_covariances_.data[off + 5],
-                             latest_pnp_covariances_.data[off + 6], latest_pnp_covariances_.data[off + 7], latest_pnp_covariances_.data[off + 8];
+            if (enable_mc_cov_) {
+                std::vector<Eigen::Vector3d> sampled_translations;
+                for (int s = 0; s < mc_samples_; ++s) {
+                    std::vector<cv::Point2f> perturbed_pts = image_points;
+                    for (auto &pt : perturbed_pts) {
+                        pt.x += static_cast<float>(noise_dist(rng));
+                        pt.y += static_cast<float>(noise_dist(rng));
+                    }
+                    cv::Mat r_s, t_s;
+                    if (cv::solvePnP(object_points_4p_, perturbed_pts, K_, D_, r_s, t_s, false, cv::SOLVEPNP_IPPE)) {
+                        if (t_s.at<double>(2) > 0.3) {
+                            sampled_translations.emplace_back(
+                                t_s.at<double>(0),
+                                t_s.at<double>(1),
+                                t_s.at<double>(2)
+                            );
+                        }
+                    }
+                }
+
+                if (sampled_translations.size() >= static_cast<size_t>(std::max(5, mc_samples_ / 2))) {
+                    Eigen::MatrixXd samples(sampled_translations.size(), 3);
+                    for (size_t s = 0; s < sampled_translations.size(); ++s) {
+                        samples.row(s) = sampled_translations[s];
+                    }
+                    Eigen::Vector3d mean = samples.colwise().mean();
+                    Eigen::MatrixXd centered = samples.rowwise() - mean.transpose();
+                    R_pnp_cam = (centered.transpose() * centered) / static_cast<double>(sampled_translations.size() - 1);
+                    // Regularization floor (0.05m)^2
+                    R_pnp_cam += Eigen::Matrix3d::Identity() * 0.0025;
+                } else {
+                    double sig = (dist_to_cam > 20.0) ? 8.0 : (1.5 + (dist_to_cam / 20.0) * 6.5);
+                    R_pnp_cam = Eigen::Matrix3d::Identity() * (sig * sig);
+                }
             } else {
-                // Distance-dependent Error Sigma Fallback (smoothly scaling up to max_refine_dist_)
                 double eff_pnp_sigma = pnp_sigma_;
                 if (dist_to_cam > 36.0) {
                     eff_pnp_sigma = 10.0;
                 } else if (dist_to_cam > 5.0) {
                     double ratio = (dist_to_cam - 5.0) / (36.0 - 5.0);
                     eff_pnp_sigma = pnp_sigma_ + ratio * (10.0 - pnp_sigma_);
-                } else {
-                    eff_pnp_sigma = pnp_sigma_;
                 }
                 R_pnp_cam = Eigen::Matrix3d::Identity() * (eff_pnp_sigma * eff_pnp_sigma);
             }
@@ -461,97 +599,192 @@ private:
             }
         }
 
-        // Apply EKF update exclusively to the active target gate
         if (best_pnp_idx != -1) {
-            if (target_idx == 4 && blend_gate5_with_mean_1_2_) {
-                // When targeting Gate 5 and blend is enabled, blend raw PnP offset (60%) with Gate 2 offset (40%)
-                Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
-                Eigen::Vector3d offset_5_raw = best_z_meas - gates_[4].prior_pos_enu;
+            apply_gate_update(target_idx, best_z_meas, best_R_meas, min_mahalanobis_sq);
+        }
+    }
 
-                Eigen::Vector3d blended_offset = 0.40 * offset_2 + 0.60 * offset_5_raw;
-                Eigen::Vector3d z_meas_blended = gates_[4].prior_pos_enu + blended_offset;
+    void pnp_poses_callback(const geometry_msgs::msg::PoseArray::SharedPtr msg) {
+        if (!drone_pose_received_) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "Waiting for /mavros/local_position/pose before processing PnP gate measurements..."
+            );
+            return;
+        }
 
-                update_gate_kalman(gates_[4], z_meas_blended, best_R_meas, min_mahalanobis_sq);
-            } else if (target_idx == 2) {
-                // When targeting Gate 3, blend 50% Gate 3 PnP measurement with 50% upstream Gate 1/2 mean offset across full horizontal plane (X and Y)
-                Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
-                Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
-                Eigen::Vector3d raw_offset_1_2 = tunnel_blend_gate1_and_2_ ? (0.5 * (offset_1 + offset_2)) : offset_2;
+        if (msg->poses.empty()) {
+            return;
+        }
 
-                // 2D Full Horizontal Offset (X, Y) from Gate 1 and 2
-                Eigen::Vector3d offset_1_2_horiz(raw_offset_1_2.x(), raw_offset_1_2.y(), 0.0);
+        // 1. Attitude Gating
+        double qw = latest_drone_rot_.w();
+        double qx = latest_drone_rot_.x();
+        double qy = latest_drone_rot_.y();
+        double qz = latest_drone_rot_.z();
 
-                // 2D Full Horizontal Offset (X, Y) from Gate 3 PnP
-                Eigen::Vector3d offset_3_pnp_raw = best_z_meas - gates_[2].prior_pos_enu;
-                Eigen::Vector3d offset_3_pnp_horiz(offset_3_pnp_raw.x(), offset_3_pnp_raw.y(), 0.0);
+        double roll = std::atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy));
+        double sin_pitch = std::clamp(2.0 * (qw * qy - qz * qx), -1.0, 1.0);
+        double pitch = std::asin(sin_pitch);
 
-                // 50% Gate 1/2 horizontal shift + 50% Gate 3 PnP horizontal shift
-                Eigen::Vector3d blended_horiz = 0.50 * offset_1_2_horiz + 0.50 * offset_3_pnp_horiz;
-                Eigen::Vector3d z_meas_gate3 = gates_[2].prior_pos_enu + blended_horiz;
-                z_meas_gate3.z() = best_z_meas.z(); // Keep vertical height from PnP
+        if (std::abs(roll) > max_tilt_rad_ || std::abs(pitch) > max_tilt_rad_) {
+            return;
+        }
 
-                update_gate_kalman(gates_[2], z_meas_gate3, best_R_meas, min_mahalanobis_sq);
+        // 2. Target Gate Isolation
+        int target_idx = active_target_gate_idx_;
+        if (target_idx < 0 || target_idx >= static_cast<int>(gates_.size())) {
+            return;
+        }
 
-                // Synchronize Gate 4 to maintain the exact same total world-space offset as Gate 3
-                Eigen::Vector3d total_offset_3 = gates_[2].position_enu - gates_[2].prior_pos_enu;
-                if (gates_.size() > 3) {
-                    gates_[3].position_enu = gates_[3].prior_pos_enu + total_offset_3;
-                }
-            } else if (target_idx == 1) {
-                // When targeting Gate 2, refine Gate 2 directly using its own PnP measurements (inheriting Gate 1's position as prior)
-                Eigen::Vector3d z_meas_2;
-                if (use_1d_right_axis_offset_) {
-                    const Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
-                    Eigen::Vector3d r2 = (gates_[1].normal_enu.cross(up_enu)).normalized();
-                    Eigen::Vector3d delta_z2 = best_z_meas - gates_[1].prior_pos_enu;
-                    double delta_r2 = delta_z2.dot(r2);
-                    z_meas_2 = gates_[1].prior_pos_enu + delta_r2 * r2;
-                } else {
-                    z_meas_2 = best_z_meas;
-                }
+        if (target_idx == 3) {
+            return;
+        }
 
-                update_gate_kalman(gates_[1], z_meas_2, best_R_meas, min_mahalanobis_sq);
-            } else {
-                update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
+        const Eigen::Matrix3d R_drone = latest_drone_rot_.toRotationMatrix();
+        const Eigen::Matrix3d R_total = R_drone * R_cam_to_body_;
+        const Eigen::Matrix3d R_drone_pos = Eigen::Matrix3d::Identity() * (drone_sigma_ * drone_sigma_);
+
+        int best_pnp_idx = -1;
+        double min_mahalanobis_sq = std::numeric_limits<double>::max();
+        Eigen::Vector3d best_z_meas = Eigen::Vector3d::Zero();
+        Eigen::Matrix3d best_R_meas = Eigen::Matrix3d::Identity();
+
+        for (size_t i = 0; i < msg->poses.size(); ++i) {
+            const auto &pnp_pose = msg->poses[i];
+            Eigen::Vector3d p_pnp_rdf(pnp_pose.position.x, pnp_pose.position.y, pnp_pose.position.z);
+            double dist_to_cam = p_pnp_rdf.norm();
+
+            if (dist_to_cam > max_refine_dist_) {
+                continue;
             }
 
-            // When Gate 1 or Gate 2 is refined, propagate full 2D horizontal correction offset to downstream gates
-            if (target_idx == 0 || target_idx == 1) {
-                Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
-                Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
-                
-                Eigen::Vector3d raw_offset = Eigen::Vector3d::Zero();
-                bool should_propagate = false;
-
-                if (tunnel_blend_gate1_and_2_) {
-                    // Blend Gate 1 & 2
-                    raw_offset = (target_idx == 0) ? offset_1 : (0.5 * (offset_1 + offset_2));
-                    should_propagate = true;
-                } else {
-                    // Gate 2 only (ignore Gate 1 updates for tunnels)
-                    if (target_idx == 1) {
-                        raw_offset = offset_2;
-                        should_propagate = true;
-                    }
+            Eigen::Matrix3d R_pnp_cam = Eigen::Matrix3d::Identity();
+            if (has_pnp_covariances_ && latest_pnp_covariances_.data.size() >= (i + 1) * 9) {
+                size_t off = i * 9;
+                R_pnp_cam << latest_pnp_covariances_.data[off + 0], latest_pnp_covariances_.data[off + 1], latest_pnp_covariances_.data[off + 2],
+                             latest_pnp_covariances_.data[off + 3], latest_pnp_covariances_.data[off + 4], latest_pnp_covariances_.data[off + 5],
+                             latest_pnp_covariances_.data[off + 6], latest_pnp_covariances_.data[off + 7], latest_pnp_covariances_.data[off + 8];
+            } else {
+                double eff_pnp_sigma = pnp_sigma_;
+                if (dist_to_cam > 36.0) {
+                    eff_pnp_sigma = 10.0;
+                } else if (dist_to_cam > 5.0) {
+                    double ratio = (dist_to_cam - 5.0) / (36.0 - 5.0);
+                    eff_pnp_sigma = pnp_sigma_ + ratio * (10.0 - pnp_sigma_);
                 }
+                R_pnp_cam = Eigen::Matrix3d::Identity() * (eff_pnp_sigma * eff_pnp_sigma);
+            }
 
-                if (should_propagate) {
-                    // Apply full 2D horizontal plane offset (X and Y)
-                    Eigen::Vector3d offset_to_apply(raw_offset.x(), raw_offset.y(), 0.0);
+            const Eigen::Matrix3d R_pnp_world = R_total * R_pnp_cam * R_total.transpose();
+            const Eigen::Matrix3d R_meas = R_pnp_world + R_drone_pos;
 
-                    // When Gate 1 is refined, also update Gate 2 position before drone reaches Gate 2
-                    if (target_idx == 0 && gates_.size() > 1) {
-                        gates_[1].position_enu = gates_[1].prior_pos_enu + offset_to_apply;
-                    }
-                    if (gates_.size() > 2) {
-                        gates_[2].position_enu = gates_[2].prior_pos_enu + offset_to_apply;
-                    }
-                    if (gates_.size() > 3) {
-                        gates_[3].position_enu = gates_[3].prior_pos_enu + offset_to_apply;
-                    }
-                    if (gates_.size() > 4 && blend_gate5_with_mean_1_2_) {
-                        gates_[4].position_enu = gates_[4].prior_pos_enu + 0.40 * offset_to_apply;
-                    }
+            Eigen::Vector3d z_meas = latest_drone_pos_ + (R_total * p_pnp_rdf);
+            Eigen::Vector3d y = z_meas - gates_[target_idx].position_enu;
+            Eigen::Matrix3d S = gates_[target_idx].covariance + R_meas;
+
+            double m_dist_sq = y.transpose() * S.inverse() * y;
+            double euc_dist = y.norm();
+            double dynamic_max_dist = std::max(max_dist_, 3.0 * std::sqrt(R_meas.diagonal().maxCoeff()));
+
+            if (m_dist_sq < min_mahalanobis_sq && euc_dist <= dynamic_max_dist && m_dist_sq <= mahalanobis_max_sq_) {
+                min_mahalanobis_sq = m_dist_sq;
+                best_pnp_idx = static_cast<int>(i);
+                best_z_meas = z_meas;
+                best_R_meas = R_meas;
+            }
+        }
+
+        if (best_pnp_idx != -1) {
+            apply_gate_update(target_idx, best_z_meas, best_R_meas, min_mahalanobis_sq);
+        }
+    }
+
+    void apply_gate_update(int target_idx, const Eigen::Vector3d &best_z_meas, const Eigen::Matrix3d &best_R_meas, double min_mahalanobis_sq) {
+        if (target_idx == 4 && blend_gate5_with_mean_1_2_) {
+            // When targeting Gate 5 and blend is enabled, blend raw PnP offset (60%) with Gate 2 offset (40%)
+            Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
+            Eigen::Vector3d offset_5_raw = best_z_meas - gates_[4].prior_pos_enu;
+
+            Eigen::Vector3d blended_offset = 0.40 * offset_2 + 0.60 * offset_5_raw;
+            Eigen::Vector3d z_meas_blended = gates_[4].prior_pos_enu + blended_offset;
+
+            update_gate_kalman(gates_[4], z_meas_blended, best_R_meas, min_mahalanobis_sq);
+        } else if (target_idx == 2) {
+            // When targeting Gate 3, blend 50% Gate 3 PnP measurement with 50% upstream Gate 1/2 mean offset across full horizontal plane (X and Y)
+            Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
+            Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
+            Eigen::Vector3d raw_offset_1_2 = tunnel_blend_gate1_and_2_ ? (0.5 * (offset_1 + offset_2)) : offset_2;
+
+            // 2D Full Horizontal Offset (X, Y) from Gate 1 and 2
+            Eigen::Vector3d offset_1_2_horiz(raw_offset_1_2.x(), raw_offset_1_2.y(), 0.0);
+
+            // 2D Full Horizontal Offset (X, Y) from Gate 3 PnP
+            Eigen::Vector3d offset_3_pnp_raw = best_z_meas - gates_[2].prior_pos_enu;
+            Eigen::Vector3d offset_3_pnp_horiz(offset_3_pnp_raw.x(), offset_3_pnp_raw.y(), 0.0);
+
+            // 50% Gate 1/2 horizontal shift + 50% Gate 3 PnP horizontal shift
+            Eigen::Vector3d blended_horiz = 0.50 * offset_1_2_horiz + 0.50 * offset_3_pnp_horiz;
+            Eigen::Vector3d z_meas_gate3 = gates_[2].prior_pos_enu + blended_horiz;
+            z_meas_gate3.z() = best_z_meas.z(); // Keep vertical height from PnP
+
+            update_gate_kalman(gates_[2], z_meas_gate3, best_R_meas, min_mahalanobis_sq);
+
+            // Synchronize Gate 4 to maintain the exact same total world-space offset as Gate 3
+            Eigen::Vector3d total_offset_3 = gates_[2].position_enu - gates_[2].prior_pos_enu;
+            if (gates_.size() > 3) {
+                gates_[3].position_enu = gates_[3].prior_pos_enu + total_offset_3;
+            }
+        } else if (target_idx == 1) {
+            // When targeting Gate 2, refine Gate 2 directly using its own PnP measurements (inheriting Gate 1's position as prior)
+            Eigen::Vector3d z_meas_2;
+            if (use_1d_right_axis_offset_) {
+                const Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
+                Eigen::Vector3d r2 = (gates_[1].normal_enu.cross(up_enu)).normalized();
+                Eigen::Vector3d delta_z2 = best_z_meas - gates_[1].prior_pos_enu;
+                double delta_r2 = delta_z2.dot(r2);
+                z_meas_2 = gates_[1].prior_pos_enu + delta_r2 * r2;
+            } else {
+                z_meas_2 = best_z_meas;
+            }
+
+            update_gate_kalman(gates_[1], z_meas_2, best_R_meas, min_mahalanobis_sq);
+        } else {
+            update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
+        }
+
+        // When Gate 1 or Gate 2 is refined, propagate full 2D horizontal correction offset to downstream gates
+        if (target_idx == 0 || target_idx == 1) {
+            Eigen::Vector3d offset_1 = gates_[0].position_enu - gates_[0].prior_pos_enu;
+            Eigen::Vector3d offset_2 = gates_[1].position_enu - gates_[1].prior_pos_enu;
+            
+            Eigen::Vector3d raw_offset = Eigen::Vector3d::Zero();
+            bool should_propagate = false;
+
+            if (tunnel_blend_gate1_and_2_) {
+                raw_offset = (target_idx == 0) ? offset_1 : (0.5 * (offset_1 + offset_2));
+                should_propagate = true;
+            } else {
+                if (target_idx == 1) {
+                    raw_offset = offset_2;
+                    should_propagate = true;
+                }
+            }
+
+            if (should_propagate) {
+                Eigen::Vector3d offset_to_apply(raw_offset.x(), raw_offset.y(), 0.0);
+
+                if (target_idx == 0 && gates_.size() > 1) {
+                    gates_[1].position_enu = gates_[1].prior_pos_enu + offset_to_apply;
+                }
+                if (gates_.size() > 2) {
+                    gates_[2].position_enu = gates_[2].prior_pos_enu + offset_to_apply;
+                }
+                if (gates_.size() > 3) {
+                    gates_[3].position_enu = gates_[3].prior_pos_enu + offset_to_apply;
+                }
+                if (gates_.size() > 4 && blend_gate5_with_mean_1_2_) {
+                    gates_[4].position_enu = gates_[4].prior_pos_enu + 0.40 * offset_to_apply;
                 }
             }
         }
@@ -714,6 +947,11 @@ private:
     double max_tilt_rad_;
     double max_refine_dist_;
     double camera_pitch_deg_{0.0};
+    double gate_w_{1.9};
+    double gate_h_{2.0};
+    bool enable_mc_cov_{true};
+    int mc_samples_{20};
+    double corner_noise_sigma_{2.0};
     bool publish_initial_pos_;
     bool blend_gate5_with_mean_1_2_{true};
     bool tunnel_blend_gate1_and_2_{true};
@@ -735,8 +973,16 @@ private:
     Eigen::Quaterniond initial_drone_rot_;
     bool initial_pose_captured_;
 
+    // Camera calibration & 3D object geometry
+    bool camera_info_received_{false};
+    cv::Mat K_;
+    cv::Mat D_;
+    std::vector<cv::Point3f> object_points_4p_;
+
     // ROS 2 Comms
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_drone_pose_;
+    rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr sub_camera_info_;
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_gate_corners_2d_;
     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr sub_pnp_poses_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_pnp_covariances_;
     rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr sub_target_gate_;
