@@ -29,8 +29,8 @@ def generate_launch_description():
 
     fov_arg = DeclareLaunchArgument(
         'fov',
-        default_value='1.03',
-        description='Horizontal field of view in radians (~60 degrees)'
+        default_value='1.0',
+        description='Horizontal field of view in radians (~57.3 degrees matching Webots camera)'
     )
 
     camera_pitch_deg_arg = DeclareLaunchArgument(

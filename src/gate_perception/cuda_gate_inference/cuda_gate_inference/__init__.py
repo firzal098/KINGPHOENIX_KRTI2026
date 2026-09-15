@@ -198,7 +198,8 @@ class GatePerceptionNode(Node):
         filtered_outputs = outputs[mask]
 
         detections = []
-        corners_data = []
+        # Pack timestamp [sec, nanosec] + 13 floats per gate: [score, u0, v0, c0, u1, v1, c1, u2, v2, c2, u3, v3, c3]
+        corners_data = [float(msg.header.stamp.sec), float(msg.header.stamp.nanosec)]
 
         if len(filtered_outputs) > 0:
             boxes_640 = filtered_outputs[:, :4]

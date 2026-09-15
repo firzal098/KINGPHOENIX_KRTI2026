@@ -1,6 +1,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <deque>
+#include <mutex>
 #include <cmath>
 #include <limits>
 #include <chrono>
@@ -23,6 +25,12 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 #include <std_srvs/srv/trigger.hpp>
+
+struct StampedPose {
+    rclcpp::Time stamp;
+    Eigen::Vector3d position;
+    Eigen::Quaterniond orientation;
+};
 
 struct GatePriorRDF {
     int id;
@@ -381,6 +389,7 @@ private:
     }
 
     void drone_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        std::lock_guard<std::mutex> lock(pose_mutex_);
         latest_drone_pos_ = Eigen::Vector3d(
             msg->pose.position.x,
             msg->pose.position.y,
@@ -393,6 +402,13 @@ private:
             msg->pose.orientation.y,
             msg->pose.orientation.z
         );
+
+        rclcpp::Time msg_stamp(msg->header.stamp);
+        pose_history_.push_back({msg_stamp, latest_drone_pos_, latest_drone_rot_});
+
+        while (!pose_history_.empty() && (msg_stamp - pose_history_.front().stamp).seconds() > 3.0) {
+            pose_history_.pop_front();
+        }
 
         drone_pose_received_ = true;
 
@@ -409,6 +425,51 @@ private:
                 initial_drone_pos_.x(), initial_drone_pos_.y(), initial_drone_pos_.z()
             );
         }
+    }
+
+    bool get_interpolated_drone_pose(const rclcpp::Time &query_stamp, Eigen::Vector3d &pos_out, Eigen::Quaterniond &rot_out) {
+        std::lock_guard<std::mutex> lock(pose_mutex_);
+        if (pose_history_.empty()) {
+            pos_out = latest_drone_pos_;
+            rot_out = latest_drone_rot_;
+            return false;
+        }
+
+        if (query_stamp <= pose_history_.front().stamp) {
+            pos_out = pose_history_.front().position;
+            rot_out = pose_history_.front().orientation;
+            return true;
+        }
+
+        if (query_stamp >= pose_history_.back().stamp) {
+            pos_out = pose_history_.back().position;
+            rot_out = pose_history_.back().orientation;
+            return true;
+        }
+
+        for (size_t i = 0; i + 1 < pose_history_.size(); ++i) {
+            const auto &p0 = pose_history_[i];
+            const auto &p1 = pose_history_[i + 1];
+
+            if (p0.stamp <= query_stamp && query_stamp <= p1.stamp) {
+                double dt_seg = (p1.stamp - p0.stamp).seconds();
+                if (dt_seg < 1e-6) {
+                    pos_out = p1.position;
+                    rot_out = p1.orientation;
+                    return true;
+                }
+                double alpha = (query_stamp - p0.stamp).seconds() / dt_seg;
+                alpha = std::clamp(alpha, 0.0, 1.0);
+
+                pos_out = (1.0 - alpha) * p0.position + alpha * p1.position;
+                rot_out = p0.orientation.slerp(alpha, p1.orientation);
+                return true;
+            }
+        }
+
+        pos_out = latest_drone_pos_;
+        rot_out = latest_drone_rot_;
+        return true;
     }
 
     void camera_info_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
@@ -542,15 +603,38 @@ private:
             return;
         }
 
-        if (msg->data.empty() || (msg->data.size() % 13 != 0)) {
+        if (msg->data.empty()) {
+            return;
+        }
+
+        Eigen::Vector3d drone_pos = latest_drone_pos_;
+        Eigen::Quaterniond drone_rot = latest_drone_rot_;
+        size_t off_start = 0;
+
+        if (msg->data.size() >= 2 && (msg->data.size() - 2) % 13 == 0) {
+            int32_t sec = static_cast<int32_t>(msg->data[0]);
+            uint32_t nanosec = static_cast<uint32_t>(msg->data[1]);
+            rclcpp::Time img_stamp(sec, nanosec, RCL_ROS_TIME);
+            get_interpolated_drone_pose(img_stamp, drone_pos, drone_rot);
+            off_start = 2;
+        } else if (msg->data.size() % 13 == 0) {
+            drone_pos = latest_drone_pos_;
+            drone_rot = latest_drone_rot_;
+            off_start = 0;
+        } else {
+            return;
+        }
+
+        size_t num_detections = (msg->data.size() - off_start) / 13;
+        if (num_detections == 0) {
             return;
         }
 
         // 1. Attitude Gating: Skip vision updates when drone is in high pitch/roll maneuvers to prevent projection errors
-        double qw = latest_drone_rot_.w();
-        double qx = latest_drone_rot_.x();
-        double qy = latest_drone_rot_.y();
-        double qz = latest_drone_rot_.z();
+        double qw = drone_rot.w();
+        double qx = drone_rot.x();
+        double qy = drone_rot.y();
+        double qz = drone_rot.z();
 
         double roll = std::atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy));
         double sin_pitch = std::clamp(2.0 * (qw * qy - qz * qx), -1.0, 1.0);
@@ -571,17 +655,15 @@ private:
             return;
         }
 
-        const Eigen::Matrix3d R_drone = latest_drone_rot_.toRotationMatrix();
+        const Eigen::Matrix3d R_drone = drone_rot.toRotationMatrix();
         const Eigen::Matrix3d R_total = R_drone * R_cam_to_body_; // RDF to ENU
         const Eigen::Matrix3d R_world_to_cam = R_total.transpose(); // ENU to RDF
-
-        size_t num_detections = msg->data.size() / 13;
 
         // =========================================================================
         // METHOD A1: Pixel Innovation EKF (4 Corners Averaged to 1 Center Point)
         // =========================================================================
         if (method_ == "pixel_innovation" || method_ == "pixel-innovation") {
-            Eigen::Vector3d p_cam_pred = R_world_to_cam * (gates_[target_idx].position_enu - latest_drone_pos_);
+            Eigen::Vector3d p_cam_pred = R_world_to_cam * (gates_[target_idx].position_enu - drone_pos);
             if (p_cam_pred.z() <= 0.5) {
                 return;
             }
@@ -597,7 +679,7 @@ private:
             Eigen::Vector2d best_z_center(0.0, 0.0);
 
             for (size_t i = 0; i < num_detections; ++i) {
-                size_t off = i * 13;
+                size_t off = off_start + i * 13;
                 double u0 = msg->data[off + 1], v0 = msg->data[off + 2];
                 double u1 = msg->data[off + 4], v1 = msg->data[off + 5];
                 double u2 = msg->data[off + 7], v2 = msg->data[off + 8];
@@ -679,7 +761,7 @@ private:
 
             for (size_t k = 0; k < 4; ++k) {
                 Eigen::Vector3d corner_enu = gate.position_enu + corner_offsets_enu[k];
-                p_cam_pred[k] = R_world_to_cam * (corner_enu - latest_drone_pos_);
+                p_cam_pred[k] = R_world_to_cam * (corner_enu - drone_pos);
 
                 if (p_cam_pred[k].z() <= 0.5) {
                     valid_projection = false;
@@ -705,7 +787,7 @@ private:
             Eigen::Matrix<double, 8, 1> z_meas;
 
             for (size_t i = 0; i < num_detections; ++i) {
-                size_t off = i * 13;
+                size_t off = off_start + i * 13;
                 double u0 = msg->data[off + 1], v0 = msg->data[off + 2];
                 double u1 = msg->data[off + 4], v1 = msg->data[off + 5];
                 double u2 = msg->data[off + 7], v2 = msg->data[off + 8];
@@ -790,7 +872,7 @@ private:
         std::normal_distribution<double> noise_dist(0.0, corner_noise_sigma_);
 
         for (size_t i = 0; i < num_detections; ++i) {
-            size_t off = i * 13;
+            size_t off = off_start + i * 13;
             double u0 = msg->data[off + 1], v0 = msg->data[off + 2];
             double u1 = msg->data[off + 4], v1 = msg->data[off + 5];
             double u2 = msg->data[off + 7], v2 = msg->data[off + 8];
@@ -883,7 +965,7 @@ private:
             const Eigen::Matrix3d R_pnp_world = R_total * R_pnp_cam * R_total.transpose();
             const Eigen::Matrix3d R_meas = R_pnp_world + R_drone_pos;
 
-            Eigen::Vector3d z_meas = latest_drone_pos_ + (R_total * p_pnp_rdf);
+            Eigen::Vector3d z_meas = drone_pos + (R_total * p_pnp_rdf);
 
             Eigen::Vector3d y = z_meas - gates_[target_idx].position_enu;
             Eigen::Matrix3d S = gates_[target_idx].covariance + R_meas;
@@ -910,11 +992,16 @@ private:
             return;
         }
 
+        Eigen::Vector3d drone_pos = latest_drone_pos_;
+        Eigen::Quaterniond drone_rot = latest_drone_rot_;
+        rclcpp::Time pnp_stamp(msg->header.stamp);
+        get_interpolated_drone_pose(pnp_stamp, drone_pos, drone_rot);
+
         // Attitude Gating
-        double qw = latest_drone_rot_.w();
-        double qx = latest_drone_rot_.x();
-        double qy = latest_drone_rot_.y();
-        double qz = latest_drone_rot_.z();
+        double qw = drone_rot.w();
+        double qx = drone_rot.x();
+        double qy = drone_rot.y();
+        double qz = drone_rot.z();
 
         double roll = std::atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy));
         double sin_pitch = std::clamp(2.0 * (qw * qy - qz * qx), -1.0, 1.0);
@@ -929,7 +1016,7 @@ private:
             return;
         }
 
-        const Eigen::Matrix3d R_drone = latest_drone_rot_.toRotationMatrix();
+        const Eigen::Matrix3d R_drone = drone_rot.toRotationMatrix();
         const Eigen::Matrix3d R_total = R_drone * R_cam_to_body_;
         const Eigen::Matrix3d R_drone_pos = Eigen::Matrix3d::Identity() * (drone_sigma_ * drone_sigma_);
 
@@ -967,7 +1054,7 @@ private:
             const Eigen::Matrix3d R_pnp_world = R_total * R_pnp_cam * R_total.transpose();
             const Eigen::Matrix3d R_meas = R_pnp_world + R_drone_pos;
 
-            Eigen::Vector3d z_meas = latest_drone_pos_ + (R_total * p_pnp_rdf);
+            Eigen::Vector3d z_meas = drone_pos + (R_total * p_pnp_rdf);
             Eigen::Vector3d y = z_meas - gates_[target_idx].position_enu;
             Eigen::Matrix3d S = gates_[target_idx].covariance + R_meas;
 
@@ -1019,19 +1106,22 @@ private:
             if (gates_.size() > 3) {
                 gates_[3].position_enu = gates_[3].prior_pos_enu + total_offset_3;
             }
-        } else if (target_idx == 1) {
-            Eigen::Vector3d z_meas_2;
+        } else if (target_idx == 0 || target_idx == 1) {
+            Eigen::Vector3d z_meas_lat;
             if (use_1d_right_axis_offset_) {
                 const Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
-                Eigen::Vector3d r2 = (gates_[1].normal_enu.cross(up_enu)).normalized();
-                Eigen::Vector3d delta_z2 = best_z_meas - gates_[1].prior_pos_enu;
-                double delta_r2 = delta_z2.dot(r2);
-                z_meas_2 = gates_[1].prior_pos_enu + delta_r2 * r2;
+                Eigen::Vector3d r_k = (gates_[target_idx].normal_enu.cross(up_enu)).normalized();
+                if (r_k.norm() < 0.1) {
+                    r_k = Eigen::Vector3d(0.0, 1.0, 0.0);
+                }
+                Eigen::Vector3d delta_z = best_z_meas - gates_[target_idx].prior_pos_enu;
+                double delta_r = delta_z.dot(r_k);
+                z_meas_lat = gates_[target_idx].prior_pos_enu + delta_r * r_k;
             } else {
-                z_meas_2 = best_z_meas;
+                z_meas_lat = best_z_meas;
             }
 
-            update_gate_kalman(gates_[1], z_meas_2, best_R_meas, min_mahalanobis_sq);
+            update_gate_kalman(gates_[target_idx], z_meas_lat, best_R_meas, min_mahalanobis_sq);
         } else {
             update_gate_kalman(gates_[target_idx], best_z_meas, best_R_meas, min_mahalanobis_sq);
         }
@@ -1263,6 +1353,8 @@ private:
     Eigen::Vector3d latest_drone_pos_;
     Eigen::Quaterniond latest_drone_rot_;
     bool drone_pose_received_;
+    std::deque<StampedPose> pose_history_;
+    std::mutex pose_mutex_;
 
     Eigen::Vector3d initial_drone_pos_;
     Eigen::Quaterniond initial_drone_rot_;
