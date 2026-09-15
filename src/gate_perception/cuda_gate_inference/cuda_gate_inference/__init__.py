@@ -282,7 +282,7 @@ class GatePerceptionNode(Node):
 
         # 1. Render YOLO Detections (Solid for PnP, Half-Transparent for Pixel Innovation)
         if len(detections) > 0:
-            if self.method == 'pixel_innovation':
+            if self.method in ['pixel_innovation', 'pixel-innovation', 'pixel_innovation_advanced', 'pixel-innovation-advanced']:
                 overlay = vis_img.copy()
                 for det in detections:
                     cx, cy, w, h = det['bbox']

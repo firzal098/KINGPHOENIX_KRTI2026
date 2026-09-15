@@ -60,12 +60,12 @@ public:
         this->declare_parameter<double>("pnp_vision_sigma", 4.0);
         this->declare_parameter<double>("association_max_dist", 6.0);
         this->declare_parameter<double>("mahalanobis_thresh_sq", 11.345);
-        this->declare_parameter<double>("max_prior_deviation_m", 1.5);
+        this->declare_parameter<double>("max_prior_deviation_m", 12.0);
         this->declare_parameter<double>("max_refine_tilt_deg", 18.0);
         this->declare_parameter<double>("max_refine_distance_m", 36.0);
         this->declare_parameter<double>("camera_pitch_deg", 0.0);
-        this->declare_parameter<double>("gate_width_m", 1.9);
-        this->declare_parameter<double>("gate_height_m", 2.0);
+        this->declare_parameter<double>("gate_width_m", 1.78);
+        this->declare_parameter<double>("gate_height_m", 1.88);
         this->declare_parameter<bool>("enable_monte_carlo_cov", true);
         this->declare_parameter<int>("mc_samples", 20);
         this->declare_parameter<double>("corner_noise_sigma", 2.0);
@@ -84,12 +84,12 @@ public:
         pnp_sigma_                  = get_param_as_double("pnp_vision_sigma", 4.0);
         max_dist_                   = get_param_as_double("association_max_dist", 6.0);
         mahalanobis_max_sq_         = get_param_as_double("mahalanobis_thresh_sq", 11.345);
-        max_prior_deviation_        = get_param_as_double("max_prior_deviation_m", 1.5);
+        max_prior_deviation_        = get_param_as_double("max_prior_deviation_m", 12.0);
         max_tilt_rad_               = get_param_as_double("max_refine_tilt_deg", 18.0) * (M_PI / 180.0);
         max_refine_dist_            = get_param_as_double("max_refine_distance_m", 36.0);
         camera_pitch_deg_           = get_param_as_double("camera_pitch_deg", 0.0);
-        gate_w_                     = get_param_as_double("gate_width_m", 1.9);
-        gate_h_                     = get_param_as_double("gate_height_m", 2.0);
+        gate_w_                     = get_param_as_double("gate_width_m", 1.78);
+        gate_h_                     = get_param_as_double("gate_height_m", 1.88);
         enable_mc_cov_              = this->get_parameter("enable_monte_carlo_cov").as_bool();
         mc_samples_                 = static_cast<int>(this->get_parameter("mc_samples").as_int());
         corner_noise_sigma_         = get_param_as_double("corner_noise_sigma", 2.0);
@@ -254,11 +254,11 @@ private:
         initial_markers_msg_.markers.clear();
 
         std::vector<GatePriorRDF> priors_rdf = {
-            {1,  0.41, -0.75, 29.33,  0.0, 0.0, 1.0},
-            {2,  5.46, -0.75, 19.31,  0.0, 0.0, 1.0},
-            {3,  9.49, -0.75, 10.51,  1.0, 0.0, 0.0},
-            {4, 12.41, -0.75, 12.43,  0.0, 0.0, 1.0},
-            {5, 17.47, -0.75, 29.38,  0.0, 0.0, 1.0}
+            {1,  0.41, -0.85, 29.46,  0.0, 0.0, 1.0},
+            {2,  5.46, -0.85, 19.31,  0.0, 0.0, 1.0},
+            {3,  9.49, -0.85, 10.51,  1.0, 0.0, 0.0},
+            {4, 12.41, -0.85, 12.43,  0.0, 0.0, 1.0},
+            {5, 17.47, -0.85, 29.38,  0.0, 0.0, 1.0}
         };
 
         const double initial_var = prior_sigma_ * prior_sigma_;
@@ -578,9 +578,9 @@ private:
         size_t num_detections = msg->data.size() / 13;
 
         // =========================================================================
-        // METHOD A: Pixel Innovation EKF (Direct 2D Image Domain Measurement Update)
+        // METHOD A1: Pixel Innovation EKF (4 Corners Averaged to 1 Center Point)
         // =========================================================================
-        if (method_ == "pixel_innovation") {
+        if (method_ == "pixel_innovation" || method_ == "pixel-innovation") {
             Eigen::Vector3d p_cam_pred = R_world_to_cam * (gates_[target_idx].position_enu - latest_drone_pos_);
             if (p_cam_pred.z() <= 0.5) {
                 return;
@@ -641,6 +641,135 @@ private:
 
                 // Anti-drift prior clamp
                 clamp_gate_position(gates_[target_idx]);
+
+                // Propagate offset downstream
+                propagate_offsets(target_idx);
+            }
+            return;
+        }
+
+        // =========================================================================
+        // METHOD A2: Pixel Innovation Advanced (Locked Depth & Elevation, 1D Lateral EKF)
+        // =========================================================================
+        if (method_ == "pixel_innovation_advanced" || method_ == "pixel-innovation-advanced") {
+            auto &gate = gates_[target_idx];
+
+            // Gate coordinate axes in World ENU
+            Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
+            Eigen::Vector3d r_gate = (gate.normal_enu.cross(up_enu)).normalized();
+            if (r_gate.norm() < 0.1) {
+                r_gate = Eigen::Vector3d(0.0, 1.0, 0.0);
+            }
+            Eigen::Vector3d u_gate = up_enu;
+            double hw = gate_w_ / 2.0;
+            double hh = gate_h_ / 2.0;
+
+            // 4 Corner offsets relative to gate center in World ENU:
+            std::vector<Eigen::Vector3d> corner_offsets_enu = {
+                -hw * r_gate + hh * u_gate, // TL (0)
+                 hw * r_gate + hh * u_gate, // TR (1)
+                 hw * r_gate - hh * u_gate, // BR (2)
+                -hw * r_gate - hh * u_gate  // BL (3)
+            };
+
+            // Predict 4 corner positions in camera RDF frame
+            std::vector<Eigen::Vector3d> p_cam_pred(4);
+            Eigen::Matrix<double, 8, 1> z_pred;
+            bool valid_projection = true;
+
+            for (size_t k = 0; k < 4; ++k) {
+                Eigen::Vector3d corner_enu = gate.position_enu + corner_offsets_enu[k];
+                p_cam_pred[k] = R_world_to_cam * (corner_enu - latest_drone_pos_);
+
+                if (p_cam_pred[k].z() <= 0.5) {
+                    valid_projection = false;
+                    break;
+                }
+
+                double z_inv = 1.0 / p_cam_pred[k].z();
+                z_pred(2 * k)     = fx_ * p_cam_pred[k].x() * z_inv + cx_;
+                z_pred(2 * k + 1) = fy_ * p_cam_pred[k].y() * z_inv + cy_;
+            }
+
+            if (!valid_projection) {
+                return;
+            }
+
+            // Predicted center pixel for data association
+            double u_pred_center = 0.25 * (z_pred(0) + z_pred(2) + z_pred(4) + z_pred(6));
+            double v_pred_center = 0.25 * (z_pred(1) + z_pred(3) + z_pred(5) + z_pred(7));
+
+            // Find best matching detection based on 2D pixel distance to predicted center
+            int best_det_idx = -1;
+            double min_pix_dist = std::numeric_limits<double>::max();
+            Eigen::Matrix<double, 8, 1> z_meas;
+
+            for (size_t i = 0; i < num_detections; ++i) {
+                size_t off = i * 13;
+                double u0 = msg->data[off + 1], v0 = msg->data[off + 2];
+                double u1 = msg->data[off + 4], v1 = msg->data[off + 5];
+                double u2 = msg->data[off + 7], v2 = msg->data[off + 8];
+                double u3 = msg->data[off + 10], v3 = msg->data[off + 11];
+
+                double u_c = 0.25 * (u0 + u1 + u2 + u3);
+                double v_c = 0.25 * (v0 + v1 + v2 + v3);
+
+                double dist = std::hypot(u_c - u_pred_center, v_c - v_pred_center);
+                if (dist < min_pix_dist) {
+                    min_pix_dist = dist;
+                    best_det_idx = static_cast<int>(i);
+                    z_meas << u0, v0, u1, v1, u2, v2, u3, v3;
+                }
+            }
+
+            // Gating: Only accept detection if center is within 180 pixels of prediction
+            if (best_det_idx != -1 && min_pix_dist < 180.0) {
+                // Lateral vector transformed to camera RDF frame: v_lat_cam = R_world_to_cam * r_gate
+                Eigen::Vector3d v_lat_cam = R_world_to_cam * r_gate;
+
+                // 8x1 Measurement Jacobian w.r.t 1D scalar lateral offset d_lat
+                Eigen::Matrix<double, 8, 1> H = Eigen::Matrix<double, 8, 1>::Zero();
+                for (size_t k = 0; k < 4; ++k) {
+                    double x_k = p_cam_pred[k].x();
+                    double y_k = p_cam_pred[k].y();
+                    double z_k = p_cam_pred[k].z();
+                    double z_inv = 1.0 / z_k;
+                    double z_inv2 = z_inv * z_inv;
+
+                    H(2 * k, 0)     = fx_ * (z_inv * v_lat_cam.x() - x_k * z_inv2 * v_lat_cam.z());
+                    H(2 * k + 1, 0) = fy_ * (z_inv * v_lat_cam.y() - y_k * z_inv2 * v_lat_cam.z());
+                }
+
+                // 8D Innovation: y = z_meas - z_pred
+                Eigen::Matrix<double, 8, 1> y_innov = z_meas - z_pred;
+
+                // 8x8 Measurement noise covariance R
+                Eigen::Matrix<double, 8, 8> R_pix = Eigen::Matrix<double, 8, 8>::Identity() * (pixel_noise_sigma_ * pixel_noise_sigma_);
+
+                // 1D Scalar Lateral Variance P_lat (with process noise)
+                double P_lat = (r_gate.transpose() * gate.covariance * r_gate)(0, 0);
+                P_lat = std::clamp(P_lat + 0.02, 0.001, 25.0);
+
+                // 8x8 Innovation Covariance S = H * P_lat * H^T + R_pix
+                Eigen::Matrix<double, 8, 8> S = H * P_lat * H.transpose() + R_pix;
+
+                // 1x8 Kalman Gain K = P_lat * H^T * S^-1
+                Eigen::Matrix<double, 1, 8> K = P_lat * H.transpose() * S.inverse();
+
+                // 1D Scalar Lateral Update
+                double delta_d_lat = (K * y_innov)(0, 0);
+
+                // Compute current lateral offset along r_gate
+                double current_d_lat = (gate.position_enu - gate.prior_pos_enu).dot(r_gate);
+                double new_d_lat = std::clamp(current_d_lat + delta_d_lat, -max_prior_deviation_, max_prior_deviation_);
+
+                // State Update: Exactly locked to prior in forward and elevation, lateral along r_gate
+                gate.position_enu = gate.prior_pos_enu + new_d_lat * r_gate;
+
+                // 1D Joseph-form Covariance Update
+                double I_minus_KH = 1.0 - (K * H)(0, 0);
+                double P_lat_new = I_minus_KH * P_lat * I_minus_KH + (K * R_pix * K.transpose())(0, 0);
+                gate.covariance = P_lat_new * (r_gate * r_gate.transpose()) + 0.01 * Eigen::Matrix3d::Identity();
 
                 // Propagate offset downstream
                 propagate_offsets(target_idx);
@@ -961,7 +1090,7 @@ private:
             gate.position_enu.x() = gate.prior_pos_enu.x() + dev.x() * scale;
             gate.position_enu.y() = gate.prior_pos_enu.y() + dev.y() * scale;
         }
-        gate.position_enu.z() = std::clamp(gate.position_enu.z(), gate.prior_pos_enu.z() - 0.35, gate.prior_pos_enu.z() + 0.35);
+        gate.position_enu.z() = std::clamp(gate.position_enu.z(), gate.prior_pos_enu.z() - 1.5, gate.prior_pos_enu.z() + 1.5);
     }
 
     void update_gate_kalman(GateState &gate, const Eigen::Vector3d &z_meas, const Eigen::Matrix3d &R_meas, [[maybe_unused]] double mahalanobis_sq) {

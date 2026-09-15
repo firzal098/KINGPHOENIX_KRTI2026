@@ -42,7 +42,7 @@ def generate_launch_description():
     method_arg = DeclareLaunchArgument(
         'method',
         default_value='pnp',
-        description='Estimation method: "pnp" (Perspective-n-Point) or "pixel_innovation" (2D Pixel Innovation EKF)'
+        description='Estimation method: "pnp" (calibrated Perspective-n-Point), "pixel_innovation" (center average), or "pixel_innovation_advanced" (locked depth & elevation, 1D lateral EKF)'
     )
 
     camera_node = Node(
@@ -120,6 +120,10 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'method':                     LaunchConfiguration('method'),
+            'gate_width_m':               1.85,
+            'gate_height_m':              1.85,
+            'pixel_noise_sigma':          1.5,
+            'max_prior_deviation_m':      12.0,
             'pnp_vision_sigma':           2.0,
             'drone_pose_sigma':           1.0,
             'gate_prior_sigma':           4.0,
