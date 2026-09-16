@@ -131,6 +131,21 @@ public:
                 }
             });
 
+        // Publisher for Gate 3.2 Ungrip Delay telemetry
+        gate3_ungrip_delay_pub_ = this->create_publisher<std_msgs::msg::Float64>(
+            "/controller/gate3_ungrip_delay", 10);
+
+        // Subscriber to dynamically adjust gate3_ungrip_delay from GCS
+        set_gate3_ungrip_delay_sub_ = this->create_subscription<std_msgs::msg::Float64>(
+            "/controller/set_gate3_ungrip_delay", qos_reliable,
+            [this](const std_msgs::msg::Float64::SharedPtr msg) {
+                if (msg && msg->data >= 0.0 && msg->data <= 30.0) {
+                    policy_.setGate3UngripDelay(msg->data);
+                    RCLCPP_INFO(this->get_logger(), "Gate 3.2 Ungrip Delay updated to: %.2f s", policy_.getGate3UngripDelay());
+                    publishGate3UngripDelay();
+                }
+            });
+
         // Service Clients
         arming_client_ = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
         command_client_ = this->create_client<mavros_msgs::srv::CommandLong>("/mavros/cmd/command");
@@ -190,6 +205,9 @@ public:
         this->declare_parameter<double>("gate1_slow_speed", 3.0);
         double gate1_slow_speed = this->get_parameter("gate1_slow_speed").as_double();
 
+        this->declare_parameter<double>("gate3_ungrip_delay", 0.0);
+        double gate3_ungrip_delay = this->get_parameter("gate3_ungrip_delay").as_double();
+
         policy_.init(this, model_path);
         policy_.setTripleGatePassMethod(triple_gate_pass_method);
         policy_.setMaxAccel(max_accel);
@@ -202,6 +220,7 @@ public:
         policy_.setGate1ServoingKp(gate1_servoing_kp);
         policy_.setGate1SlowDistance(gate1_slow_distance);
         policy_.setGate1SlowSpeed(gate1_slow_speed);
+        policy_.setGate3UngripDelay(gate3_ungrip_delay);
 
         this->declare_parameter<double>("target_altitude", 1.0);
         target_altitude_ = this->get_parameter("target_altitude").as_double();
@@ -264,6 +283,16 @@ public:
         }
 
         publishActionLimits();
+        publishGate3UngripDelay();
+    }
+
+    void publishGate3UngripDelay()
+    {
+        if (gate3_ungrip_delay_pub_) {
+            std_msgs::msg::Float64 msg;
+            msg.data = policy_.getGate3UngripDelay();
+            gate3_ungrip_delay_pub_->publish(msg);
+        }
     }
 
     void publishActionLimits()
@@ -922,6 +951,8 @@ private:
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr preview_gate_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr preview_subgate_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr action_limits_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr gate3_ungrip_delay_pub_;
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr set_gate3_ungrip_delay_sub_;
 
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
     rclcpp::Client<mavros_msgs::srv::CommandLong>::SharedPtr command_client_;

@@ -9,6 +9,9 @@
 #include <memory>
 #include <iostream>
 #include <algorithm>
+#include <thread>
+#include <chrono>
+#include <atomic>
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -17,6 +20,8 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <mavros_msgs/msg/position_target.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <std_srvs/srv/set_bool.hpp>
 
 // ONNX Runtime C++ API Header
 #include <onnxruntime_cxx_api.h>
@@ -26,11 +31,13 @@ public:
     Policy()
     : current_gate_target_index_(0),
       current_sub_gate_index_(0),
+      current_preview_gate_index_(1),
+      current_preview_sub_gate_index_(0),
       prev_dot_product_(1.0),
       has_prev_drone_pos_(false),
-      has_imu_(false),
       triple_gate_pass_method_(1),
       a_max_(5.6638),
+      has_imu_(false),
       onnx_loaded_(false)
     {
         observation_vector_.fill(0.0);
@@ -71,6 +78,9 @@ public:
         if (node_->has_parameter("gate1_servoing_kp")) {
             gate1_servoing_kp_ = node_->get_parameter("gate1_servoing_kp").as_double();
         }
+        if (node_->has_parameter("gate3_ungrip_delay")) {
+            gate3_ungrip_delay_ = node_->get_parameter("gate3_ungrip_delay").as_double();
+        }
 
         auto qos_reliable = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
         auto qos_best_effort = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
@@ -100,7 +110,11 @@ public:
         pub_action_ = node_->create_publisher<std_msgs::msg::Float64MultiArray>("/policy/action", 10);
         pub_target_subgate_ = node_->create_publisher<std_msgs::msg::Int32>("/policy/target_subgate", 10);
 
-        // 6. Initialize ONNX Runtime Session
+        // 6. Gripper Async Service Client & Command Publisher
+        gripper_client_ = node_->create_client<std_srvs::srv::SetBool>("/gripper/set_state");
+        gripper_cmd_pub_ = node_->create_publisher<std_msgs::msg::Bool>("/gripper/command", 10);
+
+        // 7. Initialize ONNX Runtime Session
         try {
             env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "PureJaxRL_Policy");
             session_options_ = std::make_unique<Ort::SessionOptions>();
@@ -916,6 +930,12 @@ public:
 
         if (passed) {
             size_t total_subgates = getSubgateCount(current_gate_target_index_);
+
+            // Automatically open gripper asynchronously after passing Gate 3.2 (or final sub-gate of Gate 3)
+            if (current_gate_target_index_ == 2 && (current_sub_gate_index_ >= 2 || current_sub_gate_index_ == total_subgates - 1)) {
+                triggerDelayedGripperOpen();
+            }
+
             if (current_sub_gate_index_ + 1 < total_subgates) {
                 current_sub_gate_index_++;
                 RCLCPP_INFO(node_->get_logger(), 
@@ -932,6 +952,73 @@ public:
         } else {
             prev_dot_product_ = curr_dot;
             prev_drone_pos_ = {px, py, pz};
+        }
+    }
+
+    /**
+     * @brief Triggers asynchronous opening of gripper after Gate 3.2, with an optional configurable delay.
+     * Non-blocking so flight control frequency is never impacted.
+     */
+    void triggerDelayedGripperOpen()
+    {
+        double delay_sec = gate3_ungrip_delay_;
+        if (delay_sec <= 0.001) {
+            openGripperAsync();
+            return;
+        }
+
+        uint32_t epoch = ++ungrip_epoch_;
+        RCLCPP_INFO(node_->get_logger(),
+            "⏳ [GRIPPER] Gate 3.2 cleared! Waiting %.2fs before opening gripper (async worker)...", delay_sec);
+
+        std::thread([this, delay_sec, epoch]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int64_t>(delay_sec * 1000.0)));
+            if (ungrip_epoch_ == epoch) {
+                openGripperAsync();
+            } else {
+                RCLCPP_INFO(node_->get_logger(), "⏹️ [GRIPPER] Delayed ungrip cancelled due to reset.");
+            }
+        }).detach();
+    }
+
+    /**
+     * @brief Asynchronously opens the gripper via /gripper/set_state service and /gripper/command topic.
+     * Non-blocking so real-time flight control loop frequency is never stalled.
+     */
+    void openGripperAsync()
+    {
+        RCLCPP_INFO(node_->get_logger(), "🔓 [GRIPPER] Triggering ASYNC Gripper Open after Gate 3.2...");
+
+        // 1. Instant publication to /gripper/command topic
+        if (gripper_cmd_pub_) {
+            std_msgs::msg::Bool cmd_msg;
+            cmd_msg.data = true;
+            gripper_cmd_pub_->publish(cmd_msg);
+        }
+
+        // 2. Non-blocking asynchronous service request to /gripper/set_state
+        if (gripper_client_) {
+            if (gripper_client_->service_is_ready()) {
+                auto req = std::make_shared<std_srvs::srv::SetBool::Request>();
+                req->data = true;
+
+                gripper_client_->async_send_request(
+                    req,
+                    [logger = node_->get_logger()](rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future) {
+                        try {
+                            auto res = future.get();
+                            if (res->success) {
+                                RCLCPP_INFO(logger, "✅ [GRIPPER] Async open succeeded: %s", res->message.c_str());
+                            } else {
+                                RCLCPP_WARN(logger, "⚠️ [GRIPPER] Async open response returned false: %s", res->message.c_str());
+                            }
+                        } catch (const std::exception& e) {
+                            RCLCPP_ERROR(logger, "❌ [GRIPPER] Async open service call error: %s", e.what());
+                        }
+                    });
+            } else {
+                RCLCPP_INFO(node_->get_logger(), "ℹ️ [GRIPPER] Service /gripper/set_state not ready yet; command sent via topic.");
+            }
         }
     }
 
@@ -1077,6 +1164,7 @@ public:
         current_gate_target_index_ = 0;
         current_sub_gate_index_ = 0;
         prev_dot_product_ = 1.0;
+        ungrip_epoch_++;
     }
 
     // Getters and Setters
@@ -1120,6 +1208,8 @@ public:
     double getGate1SlowDistance() const { return gate1_slow_distance_; }
     void setGate1SlowSpeed(double speed) { gate1_slow_speed_ = std::clamp(speed, 1.0, 16.0); }
     double getGate1SlowSpeed() const { return gate1_slow_speed_; }
+    void setGate3UngripDelay(double delay) { gate3_ungrip_delay_ = std::max(0.0, delay); }
+    double getGate3UngripDelay() const { return gate3_ungrip_delay_; }
     const std::array<double, 42>& getObservationVector() const { return observation_vector_; }
 
 private:
@@ -1195,6 +1285,11 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pub_obs_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pub_action_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr pub_target_subgate_;
+
+    rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr gripper_client_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_cmd_pub_;
+    double gate3_ungrip_delay_{0.0};
+    std::atomic<uint32_t> ungrip_epoch_{0};
 };
 
 #endif // POLICY_HPP_

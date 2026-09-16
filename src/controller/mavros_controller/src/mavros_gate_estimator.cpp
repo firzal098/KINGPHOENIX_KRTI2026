@@ -45,6 +45,7 @@ struct GatePriorRDF {
 struct GateState {
     int id;
     Eigen::Vector3d position_enu;   // 3D position in local ENU frame
+    Eigen::Vector3d smoothed_pos_enu; // Continuously smoothed 30Hz position stream for controller
     Eigen::Vector3d prior_pos_enu;  // Initial surveyed prior position in local ENU
     Eigen::Matrix3d covariance;     // 3x3 error covariance matrix
     Eigen::Vector3d normal_enu;     // Gate normal vector in ENU frame
@@ -70,7 +71,7 @@ public:
         this->declare_parameter<double>("association_max_dist", 6.0);
         this->declare_parameter<double>("mahalanobis_thresh_sq", 11.345);
         this->declare_parameter<double>("max_prior_deviation_m", 12.0);
-        this->declare_parameter<double>("max_refine_tilt_deg", 50.0);
+        this->declare_parameter<double>("max_refine_tilt_deg", 20.0);
         this->declare_parameter<double>("process_noise_q", 0.5);
         this->declare_parameter<double>("max_refine_distance_m", 36.0);
         this->declare_parameter<double>("camera_pitch_deg", 0.0);
@@ -96,7 +97,7 @@ public:
         max_dist_                   = get_param_as_double("association_max_dist", 6.0);
         mahalanobis_max_sq_         = get_param_as_double("mahalanobis_thresh_sq", 11.345);
         max_prior_deviation_        = get_param_as_double("max_prior_deviation_m", 12.0);
-        max_tilt_rad_               = get_param_as_double("max_refine_tilt_deg", 50.0) * (M_PI / 180.0);
+        max_tilt_rad_               = get_param_as_double("max_refine_tilt_deg", 20.0) * (M_PI / 180.0);
         max_refine_dist_            = get_param_as_double("max_refine_distance_m", 36.0);
         camera_pitch_deg_           = get_param_as_double("camera_pitch_deg", 0.0);
         gate_w_                     = get_param_as_double("gate_width_m", 1.78);
@@ -282,6 +283,7 @@ private:
             Eigen::Vector3d rel_norm_enu(p.nz_rdf, -p.nx_rdf, -p.ny_rdf);
 
             state.position_enu  = initial_drone_pos_ + (initial_drone_rot_ * rel_pos_enu);
+            state.smoothed_pos_enu = state.position_enu;
             state.prior_pos_enu = state.position_enu;
             state.normal_enu    = (initial_drone_rot_ * rel_norm_enu).normalized();
             state.normal_enu.z() = 0.0;
@@ -379,16 +381,22 @@ private:
         std::shared_ptr<std_srvs::srv::Trigger::Response> response)
     {
         active_target_gate_idx_ = 0;
-        const double initial_var = prior_sigma_ * prior_sigma_;
-        for (auto &gate : gates_) {
-            gate.position_enu = gate.prior_pos_enu;
-            gate.covariance = Eigen::Matrix3d::Identity() * initial_var;
+        {
+            std::lock_guard<std::mutex> lock(pose_mutex_);
+            if (drone_pose_received_) {
+                initial_drone_pos_ = latest_drone_pos_;
+                initial_drone_rot_ = latest_drone_rot_;
+            }
         }
+
+        initialize_gate_priors();
+
         response->success = true;
-        response->message = "Gate positions and covariances reset to initial ground priors.";
+        response->message = "Gate positions and covariances successfully reset and re-anchored.";
         RCLCPP_INFO(
             this->get_logger(),
-            "All gate states successfully reset to initial ground priors."
+            "All gate states successfully reset and re-anchored to current pose [%.2f, %.2f, %.2f].",
+            initial_drone_pos_.x(), initial_drone_pos_.y(), initial_drone_pos_.z()
         );
     }
 
@@ -546,11 +554,11 @@ private:
 
             // 3D points: Center, TL (6), TR (7), BR (8), BL (9)
             std::vector<Eigen::Vector3d> pts_3d = {
-                gate.position_enu,
-                gate.position_enu - hw * r_gate + hh * u_gate, // TL
-                gate.position_enu + hw * r_gate + hh * u_gate, // TR
-                gate.position_enu + hw * r_gate - hh * u_gate, // BR
-                gate.position_enu - hw * r_gate - hh * u_gate  // BL
+                gate.smoothed_pos_enu,
+                gate.smoothed_pos_enu - hw * r_gate + hh * u_gate, // TL
+                gate.smoothed_pos_enu + hw * r_gate + hh * u_gate, // TR
+                gate.smoothed_pos_enu + hw * r_gate - hh * u_gate, // BR
+                gate.smoothed_pos_enu - hw * r_gate - hh * u_gate  // BL
             };
 
             // Transform Center to Camera RDF
@@ -1019,7 +1027,17 @@ private:
         }
 
         if (best_pnp_idx != -1) {
+            // Step 1: Primary 3D PnP Kalman Filter Update
             apply_gate_update(target_idx, best_z_meas, best_R_meas, min_mahalanobis_sq);
+
+            // Step 2: Sequential Lateral 1D Pixel Innovation Update (Bearing Fine-Centering)
+            size_t best_off = off_start + best_pnp_idx * 13;
+            double u0 = msg->data[best_off + 1], u1 = msg->data[best_off + 4];
+            double u2 = msg->data[best_off + 7], u3 = msg->data[best_off + 10];
+            double u_center_meas = 0.25 * (u0 + u1 + u2 + u3);
+
+            apply_lateral_pixel_innovation(target_idx, u_center_meas, drone_pos, R_world_to_cam);
+            propagate_offsets(target_idx);
         }
     }
 
@@ -1109,6 +1127,58 @@ private:
         if (best_pnp_idx != -1) {
             apply_gate_update(target_idx, best_z_meas, best_R_meas, min_mahalanobis_sq);
         }
+    }
+
+    void apply_lateral_pixel_innovation(int target_idx, double u_meas, const Eigen::Vector3d &drone_pos, const Eigen::Matrix3d &R_world_to_cam) {
+        if (target_idx < 0 || target_idx >= static_cast<int>(gates_.size())) {
+            return;
+        }
+
+        auto &gate = gates_[target_idx];
+        const Eigen::Vector3d up_enu(0.0, 0.0, 1.0);
+        Eigen::Vector3d r_gate = (gate.normal_enu.cross(up_enu)).normalized();
+        if (r_gate.norm() < 0.1) {
+            r_gate = Eigen::Vector3d(0.0, 1.0, 0.0);
+        }
+
+        Eigen::Vector3d p_cam_pred = R_world_to_cam * (gate.position_enu - drone_pos);
+        if (p_cam_pred.z() <= 0.5) {
+            return;
+        }
+
+        double z_inv = 1.0 / p_cam_pred.z();
+        double z_inv2 = z_inv * z_inv;
+        double u_pred = fx_ * p_cam_pred.x() * z_inv + cx_;
+
+        // Lateral direction vector in camera RDF frame: v_lat_cam = R_world_to_cam * r_gate
+        Eigen::Vector3d v_lat_cam = R_world_to_cam * r_gate;
+
+        // 1D Jacobian: d(u_pred) / d(d_lat) along r_gate
+        double H_lat = fx_ * (v_lat_cam.x() * z_inv - p_cam_pred.x() * v_lat_cam.z() * z_inv2);
+
+        // 1D Scalar Lateral Variance P_lat along r_gate
+        double P_lat = (r_gate.transpose() * gate.covariance * r_gate)(0, 0);
+        P_lat = std::clamp(P_lat, 0.001, 25.0);
+
+        // Measurement noise covariance (scaled by distance to balance trust with PnP)
+        double dist_scale = std::max(1.0, p_cam_pred.z() / 15.0);
+        double eff_lat_sigma = pixel_noise_sigma_ * dist_scale;
+        double R_lat = eff_lat_sigma * eff_lat_sigma;
+
+        // 1D Kalman Innovation & Gain
+        double S_lat = H_lat * P_lat * H_lat + R_lat;
+        if (std::abs(S_lat) > 1e-6) {
+            double K_lat = (P_lat * H_lat) / S_lat;
+            double y_u = u_meas - u_pred;
+
+            double delta_d_lat = K_lat * y_u;
+            gate.position_enu += delta_d_lat * r_gate;
+
+            double P_lat_new = (1.0 - K_lat * H_lat) * P_lat;
+            gate.covariance += (P_lat_new - P_lat) * (r_gate * r_gate.transpose());
+        }
+
+        clamp_gate_position(gate);
     }
 
     void apply_gate_update(int target_idx, const Eigen::Vector3d &best_z_meas, const Eigen::Matrix3d &best_R_meas, double min_mahalanobis_sq) {
@@ -1235,11 +1305,16 @@ private:
         msg.header.stamp = header.stamp;
         msg.header.frame_id = "map";
 
-        for (const auto &gate : gates_) {
+        const double alpha = 0.35; // 30Hz exponential smoothing (tau ~ 75ms)
+
+        for (auto &gate : gates_) {
+            // Smooth discrete 10Hz vision jumps across continuous 30Hz timer ticks
+            gate.smoothed_pos_enu = (1.0 - alpha) * gate.smoothed_pos_enu + alpha * gate.position_enu;
+
             geometry_msgs::msg::Pose p;
-            p.position.x = gate.position_enu.x();
-            p.position.y = gate.position_enu.y();
-            p.position.z = gate.position_enu.z();
+            p.position.x = gate.smoothed_pos_enu.x();
+            p.position.y = gate.smoothed_pos_enu.y();
+            p.position.z = gate.smoothed_pos_enu.z();
 
             p.orientation.x = gate.orientation.x();
             p.orientation.y = gate.orientation.y();
@@ -1277,9 +1352,9 @@ private:
             box.id = gate.id;
             box.type = visualization_msgs::msg::Marker::CUBE;
             box.action = visualization_msgs::msg::Marker::ADD;
-            box.pose.position.x = gate.position_enu.x();
-            box.pose.position.y = gate.position_enu.y();
-            box.pose.position.z = gate.position_enu.z();
+            box.pose.position.x = gate.smoothed_pos_enu.x();
+            box.pose.position.y = gate.smoothed_pos_enu.y();
+            box.pose.position.z = gate.smoothed_pos_enu.z();
             box.pose.orientation.x = gate.orientation.x();
             box.pose.orientation.y = gate.orientation.y();
             box.pose.orientation.z = gate.orientation.z();
@@ -1300,9 +1375,9 @@ private:
             text.id = gate.id + 100;
             text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
             text.action = visualization_msgs::msg::Marker::ADD;
-            text.pose.position.x = gate.position_enu.x();
-            text.pose.position.y = gate.position_enu.y();
-            text.pose.position.z = gate.position_enu.z() + 1.5;
+            text.pose.position.x = gate.smoothed_pos_enu.x();
+            text.pose.position.y = gate.smoothed_pos_enu.y();
+            text.pose.position.z = gate.smoothed_pos_enu.z() + 1.5;
             text.scale.z = 0.5;
             text.color.r = 1.0f;
             text.color.g = 1.0f;

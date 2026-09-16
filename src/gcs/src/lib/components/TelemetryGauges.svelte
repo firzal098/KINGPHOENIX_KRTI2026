@@ -1,5 +1,5 @@
 <script>
-  import { dronePose, droneVel } from '../ros.js';
+  import { dronePose, droneVel, gripperOpened, gripperPending, callSetGripperState, gate3UngripDelay, setGate3UngripDelay } from '../ros.js';
 
   function fmt(val, dec = 2) {
     if (val === undefined || isNaN(val)) return '0.00';
@@ -11,9 +11,9 @@
   <div class="card-header">
     <div class="header-title font-hud">
       <span class="dot-green"></span>
-      <span>MAVROS STATE & ATTITUDE</span>
+      <span>MAVROS STATE & ACTUATORS</span>
     </div>
-    <span class="topic-tag font-mono">/mavros/local_position/*</span>
+    <span class="topic-tag font-mono">/mavros/local_position/* & /gripper/*</span>
   </div>
 
   <div class="telemetry-content">
@@ -73,6 +73,65 @@
         </div>
       </div>
     </div>
+
+    <!-- 4. Gripper Actuator -->
+    <div class="gripper-block">
+      <div class="block-title font-hud">GRIPPER (UDP 5504)</div>
+      <div class="gripper-row">
+        <div class="gripper-status-badge {$gripperOpened ? 'open' : 'closed'}">
+          <span class="status-dot"></span>
+          <span class="font-mono">{$gripperOpened ? 'OPEN' : 'CLOSED'}</span>
+        </div>
+        <div class="gripper-btn-group">
+          <button 
+            class="grp-btn {$gripperOpened ? 'active-open' : ''}" 
+            on:click={() => callSetGripperState(true)}
+            disabled={$gripperPending}
+            title="Open Gripper"
+          >
+            OPEN
+          </button>
+          <button 
+            class="grp-btn {!$gripperOpened ? 'active-closed' : ''}" 
+            on:click={() => callSetGripperState(false)}
+            disabled={$gripperPending}
+            title="Close Gripper"
+          >
+            CLOSE
+          </button>
+        </div>
+      </div>
+
+      <!-- Gate 3.2 Auto-Ungrip Delay Control -->
+      <div class="delay-row">
+        <div class="delay-info">
+          <span class="delay-lbl font-hud">GATE 3.2 UNGRIP DELAY</span>
+          <span class="delay-num font-mono">{$gate3UngripDelay.toFixed(2)}s</span>
+        </div>
+        <div class="delay-input-group">
+          <input
+            type="range"
+            min="0.0"
+            max="5.0"
+            step="0.1"
+            value={$gate3UngripDelay}
+            on:input={(e) => setGate3UngripDelay(e.target.value)}
+            class="range-slider"
+            title="Configure delay before ungripping after passing Gate 3.2"
+          />
+          <div class="delay-presets font-mono">
+            {#each [0.0, 0.5, 1.0, 2.0] as preset}
+              <button
+                class="delay-btn {Math.abs($gate3UngripDelay - preset) < 0.05 ? 'active-preset' : ''}"
+                on:click={() => setGate3UngripDelay(preset)}
+              >
+                {preset === 0.0 ? '0s' : `${preset}s`}
+              </button>
+            {/each}
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -127,18 +186,96 @@
     margin-bottom: 6px;
   }
 
-  .attitude-block, .position-block, .velocity-block {
+  .attitude-block, .position-block, .velocity-block, .gripper-block {
     background: rgba(0, 0, 0, 0.25);
     border: 1px solid var(--border-subtle);
     border-radius: 6px;
     padding: 8px 10px;
   }
 
-  .att-row, .pos-row {
+  .att-row, .pos-row, .gripper-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 6px;
+  }
+
+  .gripper-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+
+  .gripper-status-badge.open {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    box-shadow: 0 0 8px rgba(245, 158, 11, 0.2);
+  }
+  .gripper-status-badge.open .status-dot {
+    background: #fbbf24;
+    box-shadow: 0 0 6px #fbbf24;
+  }
+
+  .gripper-status-badge.closed {
+    background: rgba(0, 240, 255, 0.12);
+    color: var(--accent-cyan);
+    border: 1px solid rgba(0, 240, 255, 0.35);
+  }
+  .gripper-status-badge.closed .status-dot {
+    background: var(--accent-cyan);
+    box-shadow: 0 0 6px var(--accent-cyan);
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+
+  .gripper-btn-group {
+    display: flex;
+    gap: 4px;
+  }
+
+  .grp-btn {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-subtle);
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .grp-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--text-primary);
+  }
+
+  .grp-btn.active-open {
+    background: rgba(245, 158, 11, 0.25);
+    color: #fbbf24;
+    border-color: #fbbf24;
+    box-shadow: 0 0 8px rgba(245, 158, 11, 0.35);
+  }
+
+  .grp-btn.active-closed {
+    background: rgba(0, 240, 255, 0.22);
+    color: var(--accent-cyan);
+    border-color: var(--accent-cyan);
+    box-shadow: 0 0 8px var(--accent-cyan-glow);
+  }
+
+  .grp-btn:disabled {
+    opacity: 0.5;
+    cursor: wait;
   }
 
   .att-item {
@@ -179,4 +316,96 @@
     color: var(--accent-cyan);
     font-weight: 700;
   }
+
+  .delay-row {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .delay-info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .delay-lbl {
+    font-size: 0.62rem;
+    color: var(--text-muted);
+    letter-spacing: 0.5px;
+  }
+
+  .delay-num {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--accent-cyan);
+    background: rgba(0, 240, 255, 0.08);
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px solid rgba(0, 240, 255, 0.2);
+  }
+
+  .delay-input-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .range-slider {
+    flex: 1;
+    height: 4px;
+    appearance: none;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+
+  .range-slider::-webkit-slider-thumb {
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent-cyan);
+    box-shadow: 0 0 6px var(--accent-cyan);
+    cursor: pointer;
+    transition: transform 0.1s ease;
+  }
+
+  .range-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+  }
+
+  .delay-presets {
+    display: flex;
+    gap: 3px;
+  }
+
+  .delay-btn {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-subtle);
+    padding: 2px 5px;
+    border-radius: 3px;
+    font-size: 0.62rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .delay-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: var(--text-primary);
+  }
+
+  .delay-btn.active-preset {
+    background: rgba(0, 240, 255, 0.2);
+    color: var(--accent-cyan);
+    border-color: var(--accent-cyan);
+    box-shadow: 0 0 6px var(--accent-cyan-glow);
+  }
 </style>
+

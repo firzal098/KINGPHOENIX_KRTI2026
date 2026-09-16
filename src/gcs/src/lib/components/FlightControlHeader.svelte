@@ -11,7 +11,13 @@
     policyActionHz,
     gateEstimatorHz,
     cameraFps,
+    gripperOpened,
+    gripperPending,
     callChangeState,
+    callSetGripperState,
+    toggleGripper,
+    callFlushGyroAndHome,
+    callRebootAutopilot,
     initRosConnection,
     serviceResponseLog
   } from '../ros.js';
@@ -74,6 +80,22 @@
     callChangeState(name);
     setTimeout(() => {
       clickedAction = null;
+    }, 800);
+  }
+
+  function handleFlushGyro() {
+    clickedAction = 'FLUSH_GYRO';
+    callFlushGyroAndHome();
+    setTimeout(() => {
+      if (clickedAction === 'FLUSH_GYRO') clickedAction = null;
+    }, 800);
+  }
+
+  function handleRebootAp() {
+    clickedAction = 'REBOOT_AP';
+    callRebootAutopilot();
+    setTimeout(() => {
+      if (clickedAction === 'REBOOT_AP') clickedAction = null;
     }, 800);
   }
 
@@ -158,6 +180,20 @@
       <span class="mode-pill font-mono">{$fcuState.mode}</span>
     </div>
 
+    <!-- Gripper State -->
+    <div class="telemetry-item">
+      <span class="label">GRIPPER:</span>
+      <button 
+        class="gripper-pill font-hud {$gripperOpened ? 'gripper-pill-open' : 'gripper-pill-closed'}"
+        on:click={toggleGripper}
+        disabled={$gripperPending}
+        title="Click to {$gripperOpened ? 'Close' : 'Open'} Gripper"
+      >
+        <span class="gripper-dot"></span>
+        <span>{$gripperOpened ? 'OPEN' : 'CLOSED'}</span>
+      </button>
+    </div>
+
     <!-- Active Target Gate Indicator -->
     <div class="telemetry-item">
       <span class="label">TARGET:</span>
@@ -208,8 +244,42 @@
     </div>
   </div>
 
-  <!-- Command Actions (change_state) -->
+  <!-- Command Actions (change_state & Autopilot / EKF Utilities) -->
   <div class="actions-section">
+    <!-- Option 1: FLUSH GYRO & HOME -->
+    <button
+      class="btn-action btn-flush {clickedAction === 'FLUSH_GYRO' ? 'btn-clicking' : ''}"
+      on:click={handleFlushGyro}
+      title="Option 1: Calibrate Gyro Zero Bias (MAV_CMD 241) & Zero Local EKF Origin"
+    >
+      <span class="btn-glow"></span>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="12" y1="2" x2="12" y2="6"/>
+        <line x1="12" y1="18" x2="12" y2="22"/>
+        <line x1="2" y1="12" x2="6" y2="12"/>
+        <line x1="18" y1="12" x2="22" y2="12"/>
+      </svg>
+      <span>FLUSH GYRO</span>
+    </button>
+
+    <!-- Option 2: REBOOT AUTOPILOT -->
+    <button
+      class="btn-action btn-reboot {clickedAction === 'REBOOT_AP' ? 'btn-clicking' : ''}"
+      on:click={handleRebootAp}
+      title="Option 2: Soft-Reboot ArduPilot Autopilot & EKF3 (MAV_CMD 246)"
+    >
+      <span class="btn-glow"></span>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M23 4v6h-6"/>
+        <path d="M1 20v-6h6"/>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+      <span>REBOOT AP</span>
+    </button>
+
+    <div class="action-divider"></div>
+
     <!-- HOVER Button -->
     <button
       class="btn-action btn-hover {$controllerFsmState === 'HOVER' ? 'btn-current-active' : ''} {clickedAction === 'HOVER' ? 'btn-clicking' : ''}"
@@ -264,6 +334,29 @@
         <path d="M12 9v6M9 12h6"/>
       </svg>
       <span>FREE (RC)</span>
+    </button>
+
+    <!-- GRIPPER Toggle Button -->
+    <button
+      class="btn-action btn-gripper {$gripperOpened ? 'btn-gripper-open' : 'btn-gripper-closed'} {$gripperPending ? 'btn-clicking' : ''}"
+      on:click={toggleGripper}
+      disabled={$gripperPending}
+      title="Toggle Gripper state (UDP 5504 to Webots)"
+    >
+      <span class="btn-glow"></span>
+      {#if $gripperOpened}
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+        </svg>
+        <span>OPEN</span>
+      {:else}
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+          <line x1="12" y1="15" x2="12" y2="17"/>
+        </svg>
+        <span>CLOSED</span>
+      {/if}
     </button>
 
     <!-- OFF / LAND Button -->
@@ -756,6 +849,81 @@
     box-shadow: 0 0 16px rgba(168, 85, 247, 0.4);
   }
 
+  /* Gripper Pill in Telemetry Bar */
+  .gripper-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.74rem;
+    font-weight: 800;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all 0.2s ease;
+  }
+  .gripper-pill:hover {
+    transform: scale(1.04);
+  }
+  .gripper-pill:disabled {
+    opacity: 0.6;
+    cursor: wait;
+  }
+  .gripper-pill-open {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border-color: rgba(245, 158, 11, 0.4);
+    box-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
+  }
+  .gripper-pill-open .gripper-dot {
+    background: #fbbf24;
+    box-shadow: 0 0 6px #fbbf24;
+  }
+  .gripper-pill-closed {
+    background: rgba(0, 240, 255, 0.12);
+    color: var(--accent-cyan);
+    border-color: rgba(0, 240, 255, 0.35);
+  }
+  .gripper-pill-closed .gripper-dot {
+    background: var(--accent-cyan);
+    box-shadow: 0 0 6px var(--accent-cyan);
+  }
+  .gripper-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+
+  /* Gripper Button in Actions Section */
+  .btn-gripper {
+    position: relative;
+  }
+  .btn-gripper-open {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border-color: rgba(245, 158, 11, 0.4);
+    box-shadow: 0 0 14px rgba(245, 158, 11, 0.25);
+  }
+  .btn-gripper-open:hover {
+    background: rgba(245, 158, 11, 0.3);
+    border-color: #fbbf24;
+    box-shadow: 0 0 20px rgba(245, 158, 11, 0.45);
+  }
+  .btn-gripper-closed {
+    background: rgba(14, 165, 233, 0.12);
+    color: #38bdf8;
+    border-color: rgba(14, 165, 233, 0.35);
+  }
+  .btn-gripper-closed:hover {
+    background: rgba(14, 165, 233, 0.28);
+    border-color: #38bdf8;
+    box-shadow: 0 0 16px rgba(14, 165, 233, 0.4);
+  }
+  .btn-gripper:disabled {
+    opacity: 0.6;
+    cursor: wait;
+  }
+
   .btn-off {
     background: rgba(239, 68, 68, 0.12);
     color: var(--accent-red);
@@ -765,6 +933,36 @@
     background: rgba(239, 68, 68, 0.28);
     border-color: var(--accent-red);
     box-shadow: 0 0 16px var(--accent-red-glow);
+  }
+
+  /* Autopilot & EKF Residue Utility Buttons */
+  .action-divider {
+    width: 1px;
+    height: 24px;
+    background: var(--border-subtle);
+    margin: 0 4px;
+  }
+
+  .btn-flush {
+    background: rgba(245, 158, 11, 0.12);
+    color: #fbbf24;
+    border-color: rgba(245, 158, 11, 0.35);
+  }
+  .btn-flush:hover {
+    background: rgba(245, 158, 11, 0.26);
+    border-color: #fbbf24;
+    box-shadow: 0 0 16px rgba(245, 158, 11, 0.4);
+  }
+
+  .btn-reboot {
+    background: rgba(244, 63, 94, 0.12);
+    color: #fb7185;
+    border-color: rgba(244, 63, 94, 0.35);
+  }
+  .btn-reboot:hover {
+    background: rgba(244, 63, 94, 0.28);
+    border-color: #fb7185;
+    box-shadow: 0 0 16px rgba(244, 63, 94, 0.4);
   }
 
   /* Modal */

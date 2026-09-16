@@ -45,6 +45,12 @@ def generate_launch_description():
         description='Estimation method: "pnp" (calibrated Perspective-n-Point), "pixel_innovation" (center average), or "pixel_innovation_advanced" (locked depth & elevation, 1D lateral EKF)'
     )
 
+    gate3_ungrip_delay_arg = DeclareLaunchArgument(
+        'gate3_ungrip_delay',
+        default_value='0.0',
+        description='Delay in seconds before ungripping after clearing Gate 3.2'
+    )
+
     camera_node = Node(
         package='webots_camera_front',
         executable='camera_publisher',
@@ -67,7 +73,7 @@ def generate_launch_description():
             os.path.join(get_package_share_directory('mavros'), 'launch', 'apm_pluginlists.yaml'),
             os.path.join(get_package_share_directory('mavros'), 'launch', 'apm_config.yaml'),
             {
-                'use_sim_time':       True,
+                'use_sim_time':       False,
                 'fcu_url':            'tcp://172.24.123.183:5760',
                 'gcs_url':            'udp://@172.24.112.1:14550',
                 'tgt_system':         1,
@@ -129,7 +135,7 @@ def generate_launch_description():
             'gate_prior_sigma':           3.0,
             'association_max_dist':       10.0,
             'max_refine_distance_m':      36.0,
-            'max_refine_tilt_deg':        50.0,
+            'max_refine_tilt_deg':        20.0,
             'process_noise_q':            0.5,
             'blend_gate5_with_mean_1_2':  True,
             'tunnel_blend_gate1_and_2':   True,
@@ -158,6 +164,7 @@ def generate_launch_description():
             'gate1_servoing_kp': 4.0,
             'gate1_slow_distance': 15.0,
             'gate1_slow_speed': 3.0,
+            'gate3_ungrip_delay': LaunchConfiguration('gate3_ungrip_delay'),
         }],
     )
 
@@ -205,6 +212,23 @@ def generate_launch_description():
         ]
     )
 
+    gripper_port_arg = DeclareLaunchArgument(
+        'gripper_port',
+        default_value='5504',
+        description='UDP port for Webots gripper control'
+    )
+
+    gripper_node = Node(
+        package='gripper',
+        executable='webots_gripper',
+        name='webots_gripper',
+        output='screen',
+        parameters=[{
+            'target_ip': LaunchConfiguration('server_ip'),
+            'target_port': LaunchConfiguration('gripper_port'),
+        }]
+    )
+
     # Cleanup handler to ensure rosbridge and lingering processes are terminated on launch shutdown
     shutdown_handler = RegisterEventHandler(
         OnShutdown(
@@ -220,11 +244,14 @@ def generate_launch_description():
     return LaunchDescription([
         server_ip_arg,
         server_port_arg,
+        gripper_port_arg,
         frame_id_arg,
         fov_arg,
         camera_pitch_deg_arg,
         method_arg,
+        gate3_ungrip_delay_arg,
         camera_node,
+        gripper_node,
         mavros_node,
         set_message_interval,
         set_stream_rate,

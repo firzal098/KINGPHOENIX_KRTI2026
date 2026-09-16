@@ -91,6 +91,10 @@ export const dronePose = writable({
 // Refined 3D Gate Poses from Estimator (Array of { id, x, y, z, qx, qy, qz, qw })
 export const refinedGatePoses = writable([]);
 
+// Gripper State (true = opened, false = closed)
+export const gripperOpened = writable(false);
+export const gripperPending = writable(false);
+
 // Real-Time Topic Frequencies (Hz / FPS)
 export const policyActionHz = writable(0);
 export const gateEstimatorHz = writable(0);
@@ -99,6 +103,9 @@ export const cameraFps = writable(0);
 // Action Space Maximum Constraints
 export const maxActionMagnitude = writable(16.0); // Range: 1.0 to 16.0 m/s
 export const maxYawRateDeg = writable(360.0);      // Range: 20 to 360 deg/s
+
+// Gate 3.2 Auto-Ungrip Delay (seconds)
+export const gate3UngripDelay = writable(0.0);
 
 export const droneVel = writable({
   vx: 0.0,
@@ -589,6 +596,30 @@ function subscribeTopics() {
     }
   });
 
+  // 9. Gripper State (/gripper/state)
+  const gripperSub = new ROSLIB.Topic({
+    ros,
+    name: '/gripper/state',
+    messageType: 'std_msgs/msg/Bool',
+  });
+  gripperSub.subscribe((msg) => {
+    if (msg && typeof msg.data === 'boolean') {
+      gripperOpened.set(msg.data);
+    }
+  });
+
+  // 10. Gate 3.2 Ungrip Delay Telemetry (/controller/gate3_ungrip_delay)
+  const ungripDelaySub = new ROSLIB.Topic({
+    ros,
+    name: '/controller/gate3_ungrip_delay',
+    messageType: 'std_msgs/msg/Float64',
+  });
+  ungripDelaySub.subscribe((msg) => {
+    if (msg && typeof msg.data === 'number') {
+      gate3UngripDelay.set(Number(msg.data.toFixed(2)));
+    }
+  });
+
   // Subscribe to perception stream if active
   let active;
   isPerceptionStreamActive.subscribe((v) => (active = v))();
@@ -809,3 +840,203 @@ export function setMaxYawRateDeg(valDeg) {
   });
   topic.publish(new ROSLIB.Message({ data: clamped }));
 }
+
+// Dynamically set Gate 3.2 Ungrip Delay in seconds (0.0 to 10.0s)
+export function setGate3UngripDelay(val) {
+  const clamped = Math.max(0.0, Math.min(10.0, parseFloat(val) || 0.0));
+  gate3UngripDelay.set(Number(clamped.toFixed(2)));
+  if (!ros) return;
+  const topic = new ROSLIB.Topic({
+    ros,
+    name: '/controller/set_gate3_ungrip_delay',
+    messageType: 'std_msgs/msg/Float64',
+  });
+  topic.publish(new ROSLIB.Message({ data: clamped }));
+  addToast(`⏳ Gate 3.2 Ungrip Delay set to ${clamped.toFixed(2)}s`, 'info', 1500);
+}
+
+// Call /gripper/set_state service (std_srvs/srv/SetBool)
+export function callSetGripperState(openState) {
+  if (!ros) {
+    addToast('Cannot control gripper: ROS is not connected!', 'error', 3500);
+    return;
+  }
+
+  const targetStr = openState ? 'OPEN' : 'CLOSE';
+  addToast(`Commanding Gripper: ${targetStr}...`, 'info', 1500);
+  gripperPending.set(true);
+
+  const srv = new ROSLIB.Service({
+    ros,
+    name: '/gripper/set_state',
+    serviceType: 'std_srvs/srv/SetBool',
+  });
+
+  const request = new ROSLIB.ServiceRequest({
+    data: !!openState,
+  });
+
+  srv.callService(
+    request,
+    (result) => {
+      gripperPending.set(false);
+      if (result.success) {
+        gripperOpened.set(!!openState);
+        addToast(`✅ Gripper ${openState ? 'OPENED' : 'CLOSED'}`, 'success', 3000);
+      } else {
+        addToast(`⚠️ Gripper command: ${result.message}`, 'warning', 4000);
+      }
+
+      serviceResponseLog.update((logs) => [
+        {
+          time: new Date().toLocaleTimeString(),
+          text: `[GRIPPER_${targetStr}] ${result.message || (result.success ? 'Success' : 'Failed')}`,
+          success: result.success,
+        },
+        ...logs.slice(0, 19),
+      ]);
+    },
+    (error) => {
+      gripperPending.set(false);
+      addToast(`Gripper Service Error: ${error}`, 'error', 4500);
+      serviceResponseLog.update((logs) => [
+        {
+          time: new Date().toLocaleTimeString(),
+          text: `[GRIPPER_${targetStr}] Call failed: ${error}`,
+          success: false,
+        },
+        ...logs.slice(0, 19),
+      ]);
+    }
+  );
+}
+
+// Toggle gripper state helper
+export function toggleGripper() {
+  let current = false;
+  gripperOpened.subscribe((v) => (current = v))();
+  callSetGripperState(!current);
+}
+
+// Option 1: Flush Gyro Bias (MAV_CMD_PREFLIGHT_CALIBRATION 241) & Reset EKF Home/Origin
+export function callFlushGyroAndHome() {
+  if (!ros) {
+    addToast('Cannot flush gyro: ROS is not connected!', 'error', 4000);
+    return;
+  }
+
+  addToast('Flushing Gyro Zero-Bias & Resetting Origin...', 'info', 2500);
+
+  const calibSrv = new ROSLIB.Service({
+    ros,
+    name: '/mavros/cmd/command',
+    serviceType: 'mavros_msgs/srv/CommandLong',
+  });
+
+  const calibReq = new ROSLIB.ServiceRequest({
+    broadcast: false,
+    command: 241, // MAV_CMD_PREFLIGHT_CALIBRATION
+    confirmation: 0,
+    param1: 1.0,  // 3D Gyro calibration
+    param2: 0.0,
+    param3: 0.0,
+    param4: 0.0,
+    param5: 0.0,
+    param6: 0.0,
+    param7: 0.0,
+  });
+
+  calibSrv.callService(
+    calibReq,
+    (res) => {
+      if (res.success) {
+        addToast('✅ Gyro Bias Calibrated & Flushed', 'success', 3500);
+
+        // Also call set_home to zero out local position residue
+        const homeSrv = new ROSLIB.Service({
+          ros,
+          name: '/mavros/cmd/set_home',
+          serviceType: 'mavros_msgs/srv/CommandHome',
+        });
+        const homeReq = new ROSLIB.ServiceRequest({
+          current_gps: true,
+          latitude: 0.0,
+          longitude: 0.0,
+          altitude: 0.0,
+        });
+        homeSrv.callService(homeReq, (hRes) => {
+          if (hRes.success) {
+            addToast('✅ EKF Local Origin Zeroed at Drone Pose', 'success', 3500);
+          }
+        });
+      } else {
+        addToast(`⚠️ Gyro Calib command returned result code: ${res.result}`, 'warning', 4000);
+      }
+
+      serviceResponseLog.update((logs) => [
+        {
+          time: new Date().toLocaleTimeString(),
+          text: `[FLUSH_GYRO] Result: ${res.result || (res.success ? 'Success' : 'Failed')}`,
+          success: res.success,
+        },
+        ...logs.slice(0, 19),
+      ]);
+    },
+    (err) => {
+      addToast(`Gyro Calib Service Error: ${err}`, 'error', 4000);
+    }
+  );
+}
+
+// Option 2: Full Soft-Reboot of Autopilot / EKF3 (MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN 246)
+export function callRebootAutopilot() {
+  if (!ros) {
+    addToast('Cannot reboot autopilot: ROS is not connected!', 'error', 4000);
+    return;
+  }
+
+  addToast('Rebooting ArduPilot Autopilot & EKF3...', 'warning', 3000);
+
+  const srv = new ROSLIB.Service({
+    ros,
+    name: '/mavros/cmd/command',
+    serviceType: 'mavros_msgs/srv/CommandLong',
+  });
+
+  const req = new ROSLIB.ServiceRequest({
+    broadcast: false,
+    command: 246, // MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN
+    confirmation: 0,
+    param1: 1.0,  // Reboot autopilot
+    param2: 0.0,
+    param3: 0.0,
+    param4: 0.0,
+    param5: 0.0,
+    param6: 0.0,
+    param7: 0.0,
+  });
+
+  srv.callService(
+    req,
+    (res) => {
+      if (res.success) {
+        addToast('⚡ Autopilot reboot command sent! EKF3 reinitializing...', 'success', 5000);
+      } else {
+        addToast(`⚠️ Reboot command returned result code: ${res.result}`, 'warning', 4000);
+      }
+
+      serviceResponseLog.update((logs) => [
+        {
+          time: new Date().toLocaleTimeString(),
+          text: `[REBOOT_AUTOPILOT] Result: ${res.result || (res.success ? 'Success' : 'Failed')}`,
+          success: res.success,
+        },
+        ...logs.slice(0, 19),
+      ]);
+    },
+    (err) => {
+      addToast(`Autopilot Reboot Error: ${err}`, 'error', 4000);
+    }
+  );
+}
+
