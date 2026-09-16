@@ -304,6 +304,26 @@ public:
         }
     }
 
+    void publishZeroVelocity()
+    {
+        mavros_msgs::msg::PositionTarget stop_cmd;
+        stop_cmd.header.stamp = this->now();
+        stop_cmd.header.frame_id = "map";
+        stop_cmd.coordinate_frame = mavros_msgs::msg::PositionTarget::FRAME_LOCAL_NED;
+        stop_cmd.type_mask = mavros_msgs::msg::PositionTarget::IGNORE_PX |
+                             mavros_msgs::msg::PositionTarget::IGNORE_PY |
+                             mavros_msgs::msg::PositionTarget::IGNORE_PZ |
+                             mavros_msgs::msg::PositionTarget::IGNORE_AFX |
+                             mavros_msgs::msg::PositionTarget::IGNORE_AFY |
+                             mavros_msgs::msg::PositionTarget::IGNORE_AFZ |
+                             mavros_msgs::msg::PositionTarget::IGNORE_YAW;
+        stop_cmd.velocity.x = 0.0;
+        stop_cmd.velocity.y = 0.0;
+        stop_cmd.velocity.z = 0.0;
+        stop_cmd.yaw_rate = 0.0;
+        local_raw_pub_->publish(stop_cmd);
+    }
+
     bool changeState(const std::string & target_state)
     {
         std::string state_upper = target_state;
@@ -313,6 +333,11 @@ public:
             double current_alt = current_pose_.pose.position.z;
             bool on_ground = (!current_mavros_state_.armed || current_alt < 0.25);
 
+            if (current_fsm_state_ == FSMState::RUN) {
+                policy_.reset();
+                publishZeroVelocity();
+            }
+
             if (!on_ground && (current_fsm_state_ == FSMState::HOVER ||
                                current_fsm_state_ == FSMState::RUN ||
                                current_fsm_state_ == FSMState::HOME ||
@@ -320,11 +345,14 @@ public:
                                current_fsm_state_ == FSMState::CLIMBING ||
                                current_fsm_state_ == FSMState::TAKEOFF))
             {
-                RCLCPP_INFO(this->get_logger(), "State change request 'OFF': Drone is airborne (alt: %.2fm). Initiating LANDING sequence.", current_alt);
+                RCLCPP_INFO(this->get_logger(), "State change request 'OFF': Drone is airborne (alt: %.2fm). Braking drone still and initiating LANDING sequence.", current_alt);
+                braking_before_landing_ = true;
+                brake_start_time_ = this->now();
+                requestSetMode("BRAKE");
                 current_fsm_state_ = FSMState::LANDING;
-                requestLand();
             } else {
                 RCLCPP_INFO(this->get_logger(), "State change request 'OFF': Drone is on ground or near surface (alt: %.2fm). Entering OFF state directly and force disarming.", current_alt);
+                braking_before_landing_ = false;
                 current_fsm_state_ = FSMState::OFF;
                 if (current_mavros_state_.armed) {
                     requestForceDisarm();
@@ -341,6 +369,10 @@ public:
                 return true;
             } else {
                 RCLCPP_INFO(this->get_logger(), "Transitioning to / remaining in HOVER mode.");
+                if (current_fsm_state_ == FSMState::RUN) {
+                    policy_.reset();
+                    publishZeroVelocity();
+                }
                 hover_pose_ = current_pose_;
                 if (hover_pose_.pose.position.z < 0.3) {
                     hover_pose_.pose.position.z = target_altitude_;
@@ -387,6 +419,11 @@ public:
                 return false;
             }
 
+            if (current_fsm_state_ == FSMState::RUN) {
+                policy_.reset();
+                publishZeroVelocity();
+            }
+
             RCLCPP_INFO(this->get_logger(), "State change request 'HOME': Flying towards Home Waypoint (x: %.2f, y: %.2f, z: %.2f).",
                 home_pose_.pose.position.x, home_pose_.pose.position.y, home_pose_.pose.position.z);
             if (current_mavros_state_.mode != "GUIDED") {
@@ -397,7 +434,12 @@ public:
             return true;
         }
         else if (state_upper == "FREE") {
-            RCLCPP_INFO(this->get_logger(), "State change request 'FREE': Giving full manual/RC control. Automated setpoints & arm/disarm watchdog disabled.");
+            RCLCPP_INFO(this->get_logger(), "State change request 'FREE': Giving full manual/RC control. Immediately stopping policy and braking drone still.");
+            if (current_fsm_state_ == FSMState::RUN) {
+                policy_.reset();
+                publishZeroVelocity();
+            }
+            requestSetMode("BRAKE");
             current_fsm_state_ = FSMState::FREE;
             publishCurrentState();
             return true;
@@ -612,6 +654,8 @@ private:
             case FSMState::RUN: {
                 if (current_alt_agl < 0.20 && (current_time - run_start_time_).seconds() > 2.0) {
                     RCLCPP_WARN(this->get_logger(), "Ground sink detected in RUN (alt: %.2fm AGL < 0.20m). Auto-disarming to OFF.", current_alt_agl);
+                    policy_.reset();
+                    publishZeroVelocity();
                     current_fsm_state_ = FSMState::OFF;
                     requestForceDisarm();
                     break;
@@ -681,6 +725,25 @@ private:
 
             case FSMState::LANDING: {
                 double current_alt = current_pose_.pose.position.z;
+                double current_speed = policy_.getCurrentSpeed();
+
+                if (braking_before_landing_) {
+                    publishZeroVelocity();
+                    double brake_elapsed = (current_time - brake_start_time_).seconds();
+                    RCLCPP_INFO_THROTTLE(
+                        this->get_logger(), *this->get_clock(), 500,
+                        "FSM State: LANDING [BRAKING ACTIVE]. Stopping drone still before descent (speed: %.2f m/s, elapsed: %.2fs).",
+                        current_speed, brake_elapsed);
+
+                    if (current_speed < 0.25 || brake_elapsed > 1.2) {
+                        RCLCPP_INFO(this->get_logger(), "Drone is now still (speed: %.2f m/s). Switching to LAND mode.", current_speed);
+                        braking_before_landing_ = false;
+                        requestLand();
+                        last_request_time_ = current_time;
+                    }
+                    break;
+                }
+
                 RCLCPP_INFO_THROTTLE(
                     this->get_logger(), *this->get_clock(), 1000,
                     "FSM State: LANDING... Current Altitude: %.2fm", current_alt);
@@ -953,6 +1016,9 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr action_limits_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr gate3_ungrip_delay_pub_;
     rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr set_gate3_ungrip_delay_sub_;
+
+    bool braking_before_landing_{false};
+    rclcpp::Time brake_start_time_{0, 0, RCL_ROS_TIME};
 
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
     rclcpp::Client<mavros_msgs::srv::CommandLong>::SharedPtr command_client_;

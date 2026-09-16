@@ -135,7 +135,7 @@ def generate_launch_description():
             'gate_prior_sigma':           3.0,
             'association_max_dist':       10.0,
             'max_refine_distance_m':      36.0,
-            'max_refine_tilt_deg':        20.0,
+            'max_refine_tilt_deg':        35.0,
             'process_noise_q':            0.5,
             'blend_gate5_with_mean_1_2':  True,
             'tunnel_blend_gate1_and_2':   True,

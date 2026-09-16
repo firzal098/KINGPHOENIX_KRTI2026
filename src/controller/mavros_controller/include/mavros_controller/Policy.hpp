@@ -1210,6 +1210,12 @@ public:
     double getGate1SlowSpeed() const { return gate1_slow_speed_; }
     void setGate3UngripDelay(double delay) { gate3_ungrip_delay_ = std::max(0.0, delay); }
     double getGate3UngripDelay() const { return gate3_ungrip_delay_; }
+    double getCurrentSpeed() const {
+        return std::hypot(current_local_vel_.twist.linear.x, current_local_vel_.twist.linear.y);
+    }
+    const geometry_msgs::msg::TwistStamped& getCurrentLocalVel() const {
+        return current_local_vel_;
+    }
     const std::array<double, 42>& getObservationVector() const { return observation_vector_; }
 
 private:
