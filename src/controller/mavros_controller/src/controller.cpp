@@ -36,7 +36,8 @@ enum class FSMState {
     RUN,
     HOME,
     FREE,
-    LANDING
+    LANDING,
+    NAV_TO_LANDING_PAD
 };
 
 class ControllerNode : public rclcpp::Node
@@ -146,6 +147,13 @@ public:
                 }
             });
 
+        landing_pad_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+            "/estimator/landing_pad", 10,
+            [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+                landing_pad_pose_ = *msg;
+                has_landing_pad_ = true;
+            });
+
         // Service Clients
         arming_client_ = this->create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
         command_client_ = this->create_client<mavros_msgs::srv::CommandLong>("/mavros/cmd/command");
@@ -225,6 +233,9 @@ public:
         this->declare_parameter<double>("target_altitude", 1.0);
         target_altitude_ = this->get_parameter("target_altitude").as_double();
 
+        this->declare_parameter<double>("nav_landing_speed", 8.0);
+        nav_landing_speed_ = this->get_parameter("nav_landing_speed").as_double();
+
         // 50 Hz timer loop (20 ms period)
         timer_ = this->create_wall_timer(
             20ms, std::bind(&ControllerNode::fsmLoop, this));
@@ -246,6 +257,7 @@ public:
             case FSMState::HOME: return "HOME";
             case FSMState::FREE: return "FREE";
             case FSMState::LANDING: return "LANDING";
+            case FSMState::NAV_TO_LANDING_PAD: return "NAV_TO_LANDING_PAD";
             default: return "UNKNOWN";
         }
     }
@@ -343,7 +355,8 @@ public:
                                current_fsm_state_ == FSMState::HOME ||
                                current_fsm_state_ == FSMState::FREE ||
                                current_fsm_state_ == FSMState::CLIMBING ||
-                               current_fsm_state_ == FSMState::TAKEOFF))
+                               current_fsm_state_ == FSMState::TAKEOFF ||
+                               current_fsm_state_ == FSMState::NAV_TO_LANDING_PAD))
             {
                 RCLCPP_INFO(this->get_logger(), "State change request 'OFF': Drone is airborne (alt: %.2fm). Braking drone still and initiating LANDING sequence.", current_alt);
                 braking_before_landing_ = true;
@@ -444,8 +457,25 @@ public:
             publishCurrentState();
             return true;
         }
+        else if (state_upper == "LANDING_PAD" || state_upper == "NAV_TO_LANDING_PAD") {
+            if (current_fsm_state_ == FSMState::OFF || current_fsm_state_ == FSMState::LANDING) {
+                RCLCPP_WARN(this->get_logger(), "Cannot fly to landing pad directly from OFF/LANDING. Takeoff to HOVER first.");
+                return false;
+            }
+            RCLCPP_INFO(this->get_logger(), "State change request: Navigating to Landing Pad at 2.0m altitude.");
+            if (current_fsm_state_ == FSMState::RUN) {
+                policy_.reset();
+                publishZeroVelocity();
+            }
+            if (current_mavros_state_.mode != "GUIDED") {
+                requestSetMode("GUIDED");
+            }
+            current_fsm_state_ = FSMState::NAV_TO_LANDING_PAD;
+            publishCurrentState();
+            return true;
+        }
 
-        RCLCPP_WARN(this->get_logger(), "Invalid state request: '%s'. Valid states: 'OFF', 'HOVER', 'RUN', 'HOME', 'FREE'.", target_state.c_str());
+        RCLCPP_WARN(this->get_logger(), "Invalid state request: '%s'. Valid states: 'OFF', 'HOVER', 'RUN', 'HOME', 'FREE', 'LANDING_PAD'.", target_state.c_str());
         return false;
     }
 
@@ -670,13 +700,15 @@ private:
                 mavros_msgs::msg::PositionTarget raw_setpoint = policy_.step();
 
                 if (policy_.isAllGatesCleared()) {
-                    RCLCPP_INFO(this->get_logger(), "All gates successfully passed! Automatically transitioning from RUN to HOVER state.");
-                    hover_pose_ = current_pose_;
-                    hover_pose_.header.stamp = this->now();
-                    hover_pose_.header.frame_id = "map";
-                    hover_pose_.pose.position.z = current_pose_.pose.position.z;
-                    current_fsm_state_ = FSMState::HOVER;
-                    local_pos_pub_->publish(hover_pose_);
+                    RCLCPP_INFO(this->get_logger(), 
+                        "Gate 5 passed! Halting RL Policy and elevating altitude to 2.0m towards Landing Pad.");
+                    policy_.reset();
+                    publishZeroVelocity();
+                    if (current_mavros_state_.mode != "GUIDED") {
+                        requestSetMode("GUIDED");
+                    }
+                    current_fsm_state_ = FSMState::NAV_TO_LANDING_PAD;
+                    publishCurrentState();
                     break;
                 }
 
@@ -759,6 +791,72 @@ private:
                         requestForceDisarm();
                     }
                     current_fsm_state_ = FSMState::OFF;
+                }
+                break;
+            }
+
+            case FSMState::NAV_TO_LANDING_PAD: {
+                if (current_alt_agl < 0.20) {
+                    RCLCPP_WARN(this->get_logger(), "Ground sink detected in NAV_TO_LANDING_PAD (alt: %.2fm AGL < 0.20m). Auto-disarming to OFF.", current_alt_agl);
+                    current_fsm_state_ = FSMState::OFF;
+                    requestForceDisarm();
+                    break;
+                }
+
+                if (current_mavros_state_.mode != "GUIDED" && (current_time - last_request_time_).seconds() > 2.0) {
+                    requestSetMode("GUIDED");
+                    last_request_time_ = current_time;
+                }
+
+                // Target position: Landing pad horizontal position (East, North) and 2.0m altitude
+                double target_x = has_landing_pad_ ? landing_pad_pose_.pose.position.x : current_pose_.pose.position.x;
+                double target_y = has_landing_pad_ ? landing_pad_pose_.pose.position.y : current_pose_.pose.position.y;
+                double target_z = 2.0; // Elevate altitude to 2m
+
+                double dx = target_x - current_pose_.pose.position.x;
+                double dy = target_y - current_pose_.pose.position.y;
+                double dz = target_z - current_pose_.pose.position.z;
+                double dist_3d = std::sqrt(dx * dx + dy * dy + dz * dz);
+                double dist_horiz = std::hypot(dx, dy);
+                double dist_vert = std::abs(dz);
+                double current_speed = policy_.getCurrentSpeed();
+
+                geometry_msgs::msg::PoseStamped pad_waypoint;
+                pad_waypoint.header.stamp = this->now();
+                pad_waypoint.header.frame_id = "map";
+                pad_waypoint.pose.position.x = target_x;
+                pad_waypoint.pose.position.y = target_y;
+                pad_waypoint.pose.position.z = target_z;
+
+                // Steer nose towards landing pad if traveling horizontally
+                if (dist_horiz > 0.5) {
+                    double target_yaw = std::atan2(dy, dx);
+                    pad_waypoint.pose.orientation.x = 0.0;
+                    pad_waypoint.pose.orientation.y = 0.0;
+                    pad_waypoint.pose.orientation.z = std::sin(target_yaw * 0.5);
+                    pad_waypoint.pose.orientation.w = std::cos(target_yaw * 0.5);
+                } else {
+                    pad_waypoint.pose.orientation = current_pose_.pose.orientation;
+                }
+
+                local_pos_pub_->publish(pad_waypoint);
+
+                RCLCPP_INFO_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 1000,
+                    "FSM State: NAV_TO_LANDING_PAD. Flying towards Pad Waypoint (x: %.2f, y: %.2f, z: 2.0m) | Dist: %.2fm (horiz: %.2fm, vert: %.2fm, speed: %.2fm/s)",
+                    target_x, target_y, dist_3d, dist_horiz, dist_vert, current_speed);
+
+                // Check arrival: within 0.60m horizontally, within 0.40m vertically, and steady
+                if (dist_horiz < 0.60 && dist_vert < 0.40 && current_speed < 0.60) {
+                    RCLCPP_INFO(this->get_logger(),
+                        "Arrived above Landing Pad! (horiz: %.2fm, alt: %.2fm, speed: %.2fm/s). Switching to LANDING mode.",
+                        dist_horiz, current_pose_.pose.position.z, current_speed);
+                    publishZeroVelocity();
+                    braking_before_landing_ = false;
+                    current_fsm_state_ = FSMState::LANDING;
+                    requestLand();
+                    last_request_time_ = current_time;
+                    publishCurrentState();
                 }
                 break;
             }
@@ -990,6 +1088,7 @@ private:
     double target_altitude_;
     double altitude_tolerance_;
     double ground_altitude_{0.0};
+    double nav_landing_speed_{8.0};
     bool has_ground_altitude_{false};
     bool has_home_waypoint_{false};
     rclcpp::Time last_request_time_;
@@ -1019,6 +1118,10 @@ private:
 
     bool braking_before_landing_{false};
     rclcpp::Time brake_start_time_{0, 0, RCL_ROS_TIME};
+
+    geometry_msgs::msg::PoseStamped landing_pad_pose_;
+    bool has_landing_pad_{false};
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr landing_pad_sub_;
 
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
     rclcpp::Client<mavros_msgs::srv::CommandLong>::SharedPtr command_client_;

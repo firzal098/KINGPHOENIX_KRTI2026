@@ -24,6 +24,7 @@
 #include <geometry_msgs/msg/pose.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <visualization_msgs/msg/marker.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
 struct StampedPose {
@@ -219,6 +220,25 @@ public:
             std::bind(&MavrosGateEstimator::handle_reset_service, this, std::placeholders::_1, std::placeholders::_2)
         );
 
+        // Landing Pad Publisher & Services
+        pub_landing_pad_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+            "/estimator/landing_pad", 10
+        );
+        pub_landing_pad_marker_ = this->create_publisher<visualization_msgs::msg::Marker>(
+            "/estimator/landing_pad_marker", 10
+        );
+        pub_manual_pad_active_ = this->create_publisher<std_msgs::msg::Bool>(
+            "/estimator/manual_landing_pad_active", 10
+        );
+        srv_tag_landing_pad_ = this->create_service<std_srvs::srv::Trigger>(
+            "/estimator/tag_landing_pad",
+            std::bind(&MavrosGateEstimator::handle_tag_landing_pad, this, std::placeholders::_1, std::placeholders::_2)
+        );
+        srv_reset_landing_pad_ = this->create_service<std_srvs::srv::Trigger>(
+            "/estimator/reset_landing_pad",
+            std::bind(&MavrosGateEstimator::handle_reset_landing_pad, this, std::placeholders::_1, std::placeholders::_2)
+        );
+
         // 30 Hz wall timer (33,333 microseconds)
         pub_timer_ = this->create_wall_timer(
             std::chrono::microseconds(33333),
@@ -258,6 +278,9 @@ private:
 
         // Compute and publish 3D-to-2D projected gate memory pixels
         compute_and_publish_projected_pixels();
+
+        // Update and publish landing pad pose & marker
+        update_and_publish_landing_pad(header);
     }
 
     void initialize_gate_priors() {
@@ -374,9 +397,18 @@ private:
                 initial_markers_msg_.markers.push_back(init_sub_text);
             }
         }
+
+        // Initialize Landing Pad Prior: RDF = [1.74, 0.0, 54.48] m
+        // rel_pos_enu = (z_rdf, -x_rdf, -y_rdf) = (54.48, -1.74, 0.0)
+        Eigen::Vector3d pad_rel_enu(54.48, -1.74, 0.0);
+        prior_landing_pad_enu_ = initial_drone_pos_ + (initial_drone_rot_ * pad_rel_enu);
+        if (!has_manual_landing_pad_) {
+            refined_landing_pad_enu_ = prior_landing_pad_enu_;
+            smoothed_landing_pad_enu_ = prior_landing_pad_enu_;
+        }
     }
 
-    void handle_reset_service(
+    bool handle_reset_service(
         const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
         std::shared_ptr<std_srvs::srv::Trigger::Response> response)
     {
@@ -398,6 +430,98 @@ private:
             "All gate states successfully reset and re-anchored to current pose [%.2f, %.2f, %.2f].",
             initial_drone_pos_.x(), initial_drone_pos_.y(), initial_drone_pos_.z()
         );
+        return true;
+    }
+
+    bool handle_tag_landing_pad(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+    {
+        std::lock_guard<std::mutex> lock(pose_mutex_);
+        if (!drone_pose_received_) {
+            response->success = false;
+            response->message = "Cannot tag landing pad: No drone pose received yet.";
+            return true;
+        }
+
+        manual_landing_pad_enu_ = latest_drone_pos_;
+        manual_landing_pad_enu_.z() = 0.0; // Landing pad sits on ground plane
+        has_manual_landing_pad_ = true;
+        refined_landing_pad_enu_ = manual_landing_pad_enu_;
+        smoothed_landing_pad_enu_ = manual_landing_pad_enu_;
+
+        response->success = true;
+        response->message = "Landing pad manually tagged at: [" +
+                            std::to_string(manual_landing_pad_enu_.x()) + ", " +
+                            std::to_string(manual_landing_pad_enu_.y()) + ", " +
+                            std::to_string(manual_landing_pad_enu_.z()) + "]";
+        RCLCPP_INFO(this->get_logger(), "MANUAL LANDING PAD SET: %s", response->message.c_str());
+        return true;
+    }
+
+    bool handle_reset_landing_pad(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+    {
+        has_manual_landing_pad_ = false;
+        response->success = true;
+        response->message = "Manual landing pad cleared; reverted to auto-refined prior.";
+        RCLCPP_INFO(this->get_logger(), "%s", response->message.c_str());
+        return true;
+    }
+
+    void update_and_publish_landing_pad(const std_msgs::msg::Header &header) {
+        // Calculate mean translation correction across all gates
+        Eigen::Vector3d sum_gate_offset = Eigen::Vector3d::Zero();
+        int count = 0;
+        for (const auto &g : gates_) {
+            sum_gate_offset += (g.position_enu - g.prior_pos_enu);
+            count++;
+        }
+        Eigen::Vector3d mean_offset = Eigen::Vector3d::Zero();
+        if (count > 0) {
+            mean_offset = sum_gate_offset / static_cast<double>(count);
+        }
+
+        if (has_manual_landing_pad_) {
+            refined_landing_pad_enu_ = manual_landing_pad_enu_;
+        } else {
+            refined_landing_pad_enu_ = prior_landing_pad_enu_ + mean_offset;
+        }
+
+        const double alpha = 0.35;
+        smoothed_landing_pad_enu_ = (1.0 - alpha) * smoothed_landing_pad_enu_ + alpha * refined_landing_pad_enu_;
+
+        // 1. Publish PoseStamped
+        geometry_msgs::msg::PoseStamped pad_msg;
+        pad_msg.header = header;
+        pad_msg.pose.position.x = smoothed_landing_pad_enu_.x();
+        pad_msg.pose.position.y = smoothed_landing_pad_enu_.y();
+        pad_msg.pose.position.z = smoothed_landing_pad_enu_.z();
+        pad_msg.pose.orientation.w = 1.0;
+        pub_landing_pad_->publish(pad_msg);
+
+        // 2. Publish manual status flag
+        std_msgs::msg::Bool active_msg;
+        active_msg.data = has_manual_landing_pad_;
+        pub_manual_pad_active_->publish(active_msg);
+
+        // 3. Publish RViz Marker
+        visualization_msgs::msg::Marker pad_marker;
+        pad_marker.header = header;
+        pad_marker.ns = "landing_pad";
+        pad_marker.id = 999;
+        pad_marker.type = visualization_msgs::msg::Marker::CUBE;
+        pad_marker.action = visualization_msgs::msg::Marker::ADD;
+        pad_marker.pose = pad_msg.pose;
+        pad_marker.scale.x = 2.4;
+        pad_marker.scale.y = 2.4;
+        pad_marker.scale.z = 0.06;
+        pad_marker.color.r = has_manual_landing_pad_ ? 1.0f : 0.0f;
+        pad_marker.color.g = has_manual_landing_pad_ ? 0.8f : 0.9f;
+        pad_marker.color.b = has_manual_landing_pad_ ? 0.1f : 0.2f;
+        pad_marker.color.a = 0.85f;
+        pub_landing_pad_marker_->publish(pad_marker);
     }
 
     void drone_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -1472,6 +1596,13 @@ private:
     Eigen::Quaterniond initial_drone_rot_;
     bool initial_pose_captured_;
 
+    // Landing Pad state & priors
+    Eigen::Vector3d prior_landing_pad_enu_{0.0, 0.0, 0.0};
+    Eigen::Vector3d refined_landing_pad_enu_{0.0, 0.0, 0.0};
+    Eigen::Vector3d smoothed_landing_pad_enu_{0.0, 0.0, 0.0};
+    Eigen::Vector3d manual_landing_pad_enu_{0.0, 0.0, 0.0};
+    bool has_manual_landing_pad_{false};
+
     // Camera calibration & 3D object geometry
     bool camera_info_received_{false};
     cv::Mat K_;
@@ -1496,7 +1627,12 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pub_projected_pixels_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_initial_poses_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_initial_markers_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pub_landing_pad_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr pub_landing_pad_marker_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_manual_pad_active_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_gates_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_tag_landing_pad_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_landing_pad_;
     rclcpp::TimerBase::SharedPtr pub_timer_;
 
     std_msgs::msg::Float64MultiArray latest_pnp_covariances_;

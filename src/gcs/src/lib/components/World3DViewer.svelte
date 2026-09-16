@@ -11,6 +11,8 @@
     targetGateLabel,
     previewGateIndex,
     previewSubGateIndex,
+    landingPadPose,
+    manualLandingPadActive,
     setTargetGate,
     callResetGates,
     addToast
@@ -29,6 +31,7 @@
   let gridHelper;
   let rotorMeshes = [];
   let gateGroups = [];
+  let landingPadMesh;
   let trailLine;
   let trailPositions = [];
   let lastTrailX = null, lastTrailY = null, lastTrailZ = null;
@@ -50,6 +53,9 @@
     { id: 4, x: 12.41, y: -0.75, z: 12.43, nx: 0.0, ny: 0.0, nz: 1.0 },
     { id: 5, x: 17.47, y: -0.75, z: 29.38, nx: 0.0, ny: 0.0, nz: 1.0 }
   ];
+
+  // Default Landing Pad Prior (RDF = [1.74, 0.0, 54.48] m)
+  const defaultLandingPadRDF = { x: 1.74, y: 0.0, z: 54.48 };
 
   function enuToThree(x, y, z) {
     // ROS ENU: X=East (+X), Y=North (+Y), Z=Up (+Z)
@@ -242,6 +248,86 @@
     return { group, frameMat, ring, label, mainId: id, subIndex, isSubgate, offset };
   }
 
+  function buildLandingPadMesh() {
+    const group = new THREE.Group();
+    group.name = 'landing_pad';
+
+    const padWidth = 2.4;  // Along X
+    const padLength = 2.4; // Along Z
+    const padThickness = 0.08;
+
+    // Base plate
+    const baseGeo = new THREE.BoxGeometry(padWidth, padThickness, padLength);
+    const baseMat = new THREE.MeshStandardMaterial({
+      color: 0x0f172a,
+      metalness: 0.8,
+      roughness: 0.3,
+    });
+    const baseMesh = new THREE.Mesh(baseGeo, baseMat);
+    baseMesh.position.y = padThickness / 2;
+    group.add(baseMesh);
+
+    // Glowing border frame
+    const frameGeo = new THREE.BoxGeometry(padWidth + 0.15, padThickness * 0.9, padLength + 0.15);
+    const frameMat = new THREE.MeshStandardMaterial({
+      color: 0xf59e0b,
+      emissive: 0xd97706,
+      emissiveIntensity: 0.6,
+      roughness: 0.2
+    });
+    const frameMesh = new THREE.Mesh(frameGeo, frameMat);
+    frameMesh.position.y = padThickness / 2 - 0.01;
+    group.add(frameMesh);
+
+    // Helipad 'H' and circle canvas texture
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 512;
+    const ctx = canvas.getContext('2d');
+    
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(0, 0, 512, 512);
+
+    // Outer circle
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = 18;
+    ctx.beginPath();
+    ctx.arc(256, 256, 210, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Inner circle
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.arc(256, 256, 175, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 'H'
+    ctx.fillStyle = '#f59e0b';
+    ctx.font = 'bold 200px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('H', 256, 256);
+
+    const padTex = new THREE.CanvasTexture(canvas);
+    const surfaceGeo = new THREE.PlaneGeometry(padWidth * 0.94, padLength * 0.94);
+    const surfaceMat = new THREE.MeshBasicMaterial({
+      map: padTex,
+      side: THREE.DoubleSide
+    });
+    const surfaceMesh = new THREE.Mesh(surfaceGeo, surfaceMat);
+    surfaceMesh.rotation.x = -Math.PI / 2;
+    surfaceMesh.position.y = padThickness + 0.005;
+    group.add(surfaceMesh);
+
+    // 3D Label
+    const label = createTextSprite('LANDING PAD', '#f59e0b');
+    label.position.set(0, 0.8, 0);
+    group.add(label);
+
+    return { group, baseMesh, frameMat, label };
+  }
+
   function initThree() {
     if (!canvasEl || !containerEl) return;
 
@@ -251,10 +337,10 @@
     // 1. Scene
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x060913);
-    scene.fog = new THREE.FogExp2(0x060913, 0.015);
+    scene.fog = new THREE.FogExp2(0x060913, 0.008);
 
     // 2. Camera
-    camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 200);
+    camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 350);
     camera.position.set(-6, 5, 8);
 
     // 3. Renderer
@@ -274,7 +360,7 @@
     controls.dampingFactor = 0.05;
     controls.maxPolarAngle = Math.PI / 2 + 0.05;
     controls.minDistance = 1;
-    controls.maxDistance = 80;
+    controls.maxDistance = 180;
     controls.target.set(0, 1, 0);
 
     // 5. Lighting
@@ -290,7 +376,7 @@
     scene.add(cyanRim);
 
     // 6. Ground Grid (Neon Sci-Fi Arena)
-    gridHelper = new THREE.GridHelper(80, 80, 0x00f0ff, 0x1e293b);
+    gridHelper = new THREE.GridHelper(140, 140, 0x00f0ff, 0x1e293b);
     gridHelper.position.y = 0;
     gridHelper.material.opacity = 0.4;
     gridHelper.material.transparent = true;
@@ -414,6 +500,10 @@
       scene.add(pMarker);
       priorOriginMarkers.push(pMarker);
     }
+
+    // 11. Rectangular Landing Pad 3D Mesh
+    landingPadMesh = buildLandingPadMesh();
+    scene.add(landingPadMesh.group);
 
     updateGatesFromPriorsOrPoses();
 
@@ -569,6 +659,36 @@
         gate.ring.visible = false;
       }
     });
+
+    // 3. Position Landing Pad Mesh
+    if (landingPadMesh) {
+      let padX = 0, padY = 0.0, padZ = 0;
+      const isManual = $manualLandingPadActive;
+
+      if ($landingPadPose?.valid && initialDronePos) {
+        const relPos = getRelPose($landingPadPose.x, $landingPadPose.y, $landingPadPose.z);
+        padX = relPos.x;
+        padY = 0.0;
+        padZ = relPos.z;
+      } else {
+        const p = defaultLandingPadRDF;
+        const fwd = p.z;
+        const left = -p.x;
+        const initYawRad = initialDronePos ? (initialDronePos.yaw * (Math.PI / 180)) : (Math.PI / 2);
+        const dx = Math.cos(initYawRad) * fwd - Math.sin(initYawRad) * left;
+        const dy = Math.sin(initYawRad) * fwd + Math.cos(initYawRad) * left;
+        padX = dx;
+        padY = 0.0;
+        padZ = -dy;
+      }
+
+      landingPadMesh.group.position.set(padX, padY, padZ);
+
+      if (landingPadMesh.frameMat) {
+        landingPadMesh.frameMat.color.setHex(isManual ? 0xec4899 : 0xf59e0b);
+        landingPadMesh.frameMat.emissive.setHex(isManual ? 0xbe185d : 0xd97706);
+      }
+    }
   }
 
   function updateDrone() {

@@ -107,6 +107,10 @@ export const maxYawRateDeg = writable(360.0);      // Range: 20 to 360 deg/s
 // Gate 3.2 Auto-Ungrip Delay (seconds)
 export const gate3UngripDelay = writable(0.0);
 
+// Landing Pad Telemetry (/estimator/landing_pad)
+export const landingPadPose = writable({ x: 0, y: 0, z: 0, valid: false });
+export const manualLandingPadActive = writable(false);
+
 export const droneVel = writable({
   vx: 0.0,
   vy: 0.0,
@@ -306,16 +310,32 @@ export function initRosConnection(url) {
 
   ros.on('error', (error) => {
     connectionStatus.set('error');
+    cameraFps.set(0);
+    debugImage.update((prev) => ({ ...prev, fps: 0 }));
+    if (perceptionSub) {
+      try {
+        perceptionSub.unsubscribe();
+      } catch (e) {}
+      perceptionSub = null;
+    }
     connectionError.set(error?.message || `Failed to connect to ${targetUrl}`);
   });
 
   ros.on('close', () => {
     connectionStatus.set('disconnected');
+    cameraFps.set(0);
+    debugImage.update((prev) => ({ ...prev, fps: 0 }));
+    if (perceptionSub) {
+      try {
+        perceptionSub.unsubscribe();
+      } catch (e) {}
+      perceptionSub = null;
+    }
     if (!reconnectTimer) {
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         initRosConnection(targetUrl);
-      }, 3000);
+      }, 2500);
     }
   });
 }
@@ -620,27 +640,82 @@ function subscribeTopics() {
     }
   });
 
-  // Subscribe to perception stream if active
+  // 11. Landing Pad Position (/estimator/landing_pad)
+  const landingPadSub = new ROSLIB.Topic({
+    ros,
+    name: '/estimator/landing_pad',
+    messageType: 'geometry_msgs/msg/PoseStamped',
+  });
+  landingPadSub.subscribe((msg) => {
+    if (msg?.pose?.position) {
+      landingPadPose.set({
+        x: msg.pose.position.x,
+        y: msg.pose.position.y,
+        z: msg.pose.position.z,
+        valid: true,
+      });
+    }
+  });
+
+  // 12. Manual Landing Pad Status (/estimator/manual_landing_pad_active)
+  const manualPadActiveSub = new ROSLIB.Topic({
+    ros,
+    name: '/estimator/manual_landing_pad_active',
+    messageType: 'std_msgs/msg/Bool',
+  });
+  manualPadActiveSub.subscribe((msg) => {
+    if (msg && typeof msg.data === 'boolean') {
+      manualLandingPadActive.set(msg.data);
+    }
+  });
+
+  // Clear any stale perception subscription handle and resubscribe if active
+  if (perceptionSub) {
+    try {
+      perceptionSub.unsubscribe();
+    } catch (e) {}
+    perceptionSub = null;
+  }
+
   let active;
   isPerceptionStreamActive.subscribe((v) => (active = v))();
   if (active) {
-    subscribePerceptionStream();
+    subscribePerceptionStream(true);
   }
 }
 
 let perceptionSub = null;
+let lastFrameArrival = 0;
+let lastResubscribeAttempt = 0;
 export const isPerceptionStreamActive = writable(true);
 
-export function subscribePerceptionStream() {
-  if (!ros || perceptionSub) return;
+export function subscribePerceptionStream(force = false) {
+  if (!ros) return;
+  if (perceptionSub && !force) return;
+
+  // Clean up existing topic before recreating
+  if (perceptionSub) {
+    try {
+      perceptionSub.unsubscribe();
+    } catch (e) {}
+    perceptionSub = null;
+  }
+
+  imageFrameCount = 0;
+  lastFpsTime = performance.now();
+  lastResubscribeAttempt = performance.now();
 
   perceptionSub = new ROSLIB.Topic({
     ros,
     name: '/perception/debug_image/compressed',
     messageType: 'sensor_msgs/msg/CompressedImage',
+    compression: 'none',
+    throttle_rate: 0,
+    queue_size: 1,
   });
 
   perceptionSub.subscribe((msg) => {
+    lastFrameArrival = performance.now();
     imageFrameCount++;
     const now = performance.now();
     let currentFps = 0;
@@ -673,6 +748,7 @@ export function unsubscribePerceptionStream() {
     perceptionSub = null;
   }
   debugImageSrc.set('');
+  cameraFps.set(0);
   debugImage.update((prev) => ({ ...prev, fps: 0 }));
   isPerceptionStreamActive.set(false);
 }
@@ -684,9 +760,39 @@ export function togglePerceptionStream() {
     unsubscribePerceptionStream();
     addToast('Perception FPV stream paused (unsubscribed)', 'info', 2000);
   } else {
-    subscribePerceptionStream();
+    subscribePerceptionStream(true);
     addToast('Perception FPV stream resumed (subscribed)', 'success', 2000);
   }
+}
+
+// Watchdog for camera stream liveness and auto-recovery on relaunch
+if (typeof window !== 'undefined') {
+  setInterval(() => {
+    const now = performance.now();
+
+    // 1. If frames haven't arrived for > 1500ms, reset camera FPS to 0
+    if (lastFrameArrival > 0 && now - lastFrameArrival > 1500) {
+      cameraFps.set(0);
+      debugImage.update((prev) => ({ ...prev, fps: 0 }));
+    }
+
+    // 2. If ROS is connected and stream is active, but stalled for > 4000ms:
+    // re-assert topic subscription to heal from publisher relaunch without page refresh
+    let active = false;
+    isPerceptionStreamActive.subscribe((v) => (active = v))();
+
+    let status = '';
+    connectionStatus.subscribe((v) => (status = v))();
+
+    if (active && status === 'connected' && ros) {
+      if (
+        (lastFrameArrival === 0 || now - lastFrameArrival > 4000) &&
+        now - lastResubscribeAttempt > 5000
+      ) {
+        subscribePerceptionStream(true);
+      }
+    }
+  }, 1000);
 }
 
 // Call change_state service with interactive notifications
@@ -793,6 +899,70 @@ export function callResetGates() {
         },
         ...logs.slice(0, 19),
       ]);
+    }
+  );
+}
+
+// Call /estimator/tag_landing_pad service (sets landing pad to current drone pose)
+export function callTagLandingPad() {
+  if (!ros) {
+    addToast('Cannot tag landing pad: ROS is not connected!', 'error', 4000);
+    return;
+  }
+
+  addToast('Tagging current drone position as Landing Pad...', 'info', 2000);
+
+  const srv = new ROSLIB.Service({
+    ros,
+    name: '/estimator/tag_landing_pad',
+    serviceType: 'std_srvs/srv/Trigger',
+  });
+
+  const request = new ROSLIB.ServiceRequest({});
+
+  srv.callService(
+    request,
+    (result) => {
+      if (result.success) {
+        addToast(`✅ Landing Pad Tagged: ${result.message}`, 'success', 5000);
+      } else {
+        addToast(`⚠️ Failed to Tag: ${result.message}`, 'warning', 4000);
+      }
+    },
+    (err) => {
+      addToast(`❌ Service Error: ${err}`, 'error', 4000);
+    }
+  );
+}
+
+// Call /estimator/reset_landing_pad service (clears manual override, reverts to auto-refined prior)
+export function callResetLandingPad() {
+  if (!ros) {
+    addToast('Cannot reset landing pad: ROS is not connected!', 'error', 4000);
+    return;
+  }
+
+  addToast('Resetting Landing Pad to auto-refined prior...', 'info', 2000);
+
+  const srv = new ROSLIB.Service({
+    ros,
+    name: '/estimator/reset_landing_pad',
+    serviceType: 'std_srvs/srv/Trigger',
+  });
+
+  const request = new ROSLIB.ServiceRequest({});
+
+  srv.callService(
+    request,
+    (result) => {
+      if (result.success) {
+        addToast(`✅ Landing Pad Reverted: ${result.message}`, 'success', 4000);
+      } else {
+        addToast(`⚠️ Failed to Reset: ${result.message}`, 'warning', 4000);
+      }
+    },
+    (err) => {
+      addToast(`❌ Service Error: ${err}`, 'error', 4000);
     }
   );
 }

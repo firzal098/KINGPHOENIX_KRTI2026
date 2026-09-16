@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { initRosConnection, rosbridgeUrl } from './lib/ros.js';
   import FlightControlHeader from './lib/components/FlightControlHeader.svelte';
-  import DebugImageViewer from './lib/components/DebugImageViewer.svelte';
+  import ArenaViewer from './lib/components/ArenaViewer.svelte';
   import ObservationPanel from './lib/components/ObservationPanel.svelte';
   import ActionPanel from './lib/components/ActionPanel.svelte';
   import TelemetryGauges from './lib/components/TelemetryGauges.svelte';
@@ -20,10 +20,10 @@
 
   <!-- Main Multi-Column Dashboard Grid -->
   <div class="dashboard-grid">
-    <!-- Left Column: Video & Actions -->
+    <!-- Left Column: 3D Arena World & Flight Controls -->
     <div class="dash-col col-left">
-      <!-- Live Perception FPV Viewer -->
-      <DebugImageViewer />
+      <!-- Full 3D Interactive Arena World -->
+      <ArenaViewer />
 
       <!-- Policy Action Space (4D) -->
       <ActionPanel />
@@ -57,6 +57,7 @@
     grid-template-columns: 1.15fr 0.85fr;
     gap: 16px;
     flex: 1;
+    align-items: start;
   }
 
   .dash-col {

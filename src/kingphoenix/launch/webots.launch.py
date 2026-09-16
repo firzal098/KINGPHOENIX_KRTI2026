@@ -47,7 +47,7 @@ def generate_launch_description():
 
     gate3_ungrip_delay_arg = DeclareLaunchArgument(
         'gate3_ungrip_delay',
-        default_value='0.0',
+        default_value='0.33',
         description='Delay in seconds before ungripping after clearing Gate 3.2'
     )
 

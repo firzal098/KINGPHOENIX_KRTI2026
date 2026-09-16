@@ -1,5 +1,17 @@
 <script>
-  import { dronePose, droneVel, gripperOpened, gripperPending, callSetGripperState, gate3UngripDelay, setGate3UngripDelay } from '../ros.js';
+  import {
+    dronePose,
+    droneVel,
+    gripperOpened,
+    gripperPending,
+    callSetGripperState,
+    gate3UngripDelay,
+    setGate3UngripDelay,
+    landingPadPose,
+    manualLandingPadActive,
+    callTagLandingPad,
+    callResetLandingPad
+  } from '../ros.js';
 
   function fmt(val, dec = 2) {
     if (val === undefined || isNaN(val)) return '0.00';
@@ -130,6 +142,52 @@
             {/each}
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- 5. Landing Pad Subsystem -->
+    <div class="landing-pad-block">
+      <div class="landing-pad-header">
+        <div class="block-title font-hud">LANDING PAD POSITION</div>
+        <span class="pad-badge {$manualLandingPadActive ? 'badge-manual' : 'badge-auto'} font-hud">
+          {$manualLandingPadActive ? 'MANUAL TAGGED' : 'AUTO REFINED'}
+        </span>
+      </div>
+
+      <div class="pos-row font-mono">
+        <div class="pos-item">
+          <span class="pos-axis">X:</span>
+          <span class="pos-val">{$landingPadPose?.valid ? fmt($landingPadPose.x, 2) : '54.48*'}</span>
+        </div>
+        <div class="pos-item">
+          <span class="pos-axis">Y:</span>
+          <span class="pos-val">{$landingPadPose?.valid ? fmt($landingPadPose.y, 2) : '-1.74*'}</span>
+        </div>
+        <div class="pos-item highlight-alt">
+          <span class="pos-axis">Z:</span>
+          <span class="pos-val">{$landingPadPose?.valid ? fmt($landingPadPose.z, 2) : '0.00'}</span>
+        </div>
+      </div>
+
+      <div class="pad-btn-group">
+        <button
+          class="pad-action-btn tag-btn font-hud"
+          on:click={callTagLandingPad}
+          title="Tag current drone position as the landing pad"
+        >
+          <span class="target-icon">🎯</span>
+          <span>TAG CURRENT POSE</span>
+        </button>
+
+        {#if $manualLandingPadActive}
+          <button
+            class="pad-action-btn reset-btn font-hud"
+            on:click={callResetLandingPad}
+            title="Clear manual tag and revert to auto-refined prior"
+          >
+            ↺ RESET TO PRIOR
+          </button>
+        {/if}
       </div>
     </div>
   </div>
@@ -406,6 +464,88 @@
     color: var(--accent-cyan);
     border-color: var(--accent-cyan);
     box-shadow: 0 0 6px var(--accent-cyan-glow);
+  }
+
+  /* Landing Pad Block Styles */
+  .landing-pad-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(0, 0, 0, 0.25);
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-subtle);
+  }
+
+  .landing-pad-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .pad-badge {
+    font-size: 0.62rem;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+
+  .badge-auto {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10b981;
+    border: 1px solid rgba(16, 185, 129, 0.4);
+  }
+
+  .badge-manual {
+    background: rgba(236, 72, 153, 0.2);
+    color: #ec4899;
+    border: 1px solid rgba(236, 72, 153, 0.5);
+    box-shadow: 0 0 6px rgba(236, 72, 153, 0.3);
+  }
+
+  .pad-btn-group {
+    display: flex;
+    gap: 6px;
+    margin-top: 2px;
+  }
+
+  .pad-action-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 5px 8px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .tag-btn {
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(217, 119, 6, 0.3));
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.5);
+  }
+
+  .tag-btn:hover {
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.35), rgba(217, 119, 6, 0.5));
+    border-color: #f59e0b;
+    box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
+    transform: translateY(-1px);
+  }
+
+  .reset-btn {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-subtle);
+  }
+
+  .reset-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: var(--text-primary);
   }
 </style>
 
