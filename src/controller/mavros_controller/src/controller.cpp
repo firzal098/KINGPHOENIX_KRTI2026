@@ -18,6 +18,7 @@
 #include <mavros_msgs/srv/command_tol.hpp>
 #include <mavros_msgs/srv/set_mode.hpp>
 #include <mavros_controller/srv/set_string.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include "mavros_controller/Policy.hpp"
@@ -136,6 +137,7 @@ public:
         set_mode_client_ = this->create_client<mavros_msgs::srv::SetMode>("/mavros/set_mode");
         takeoff_client_ = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/takeoff");
         land_client_ = this->create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/land");
+        reset_gates_client_ = this->create_client<std_srvs::srv::Trigger>("/estimator/reset_gates");
 
         // Service Server for State Transitions
         change_state_srv_ = this->create_service<mavros_controller::srv::SetString>(
@@ -173,6 +175,21 @@ public:
         this->declare_parameter<double>("max_yaw_rate_deg", 360.0);
         double max_yaw_rate_deg = this->get_parameter("max_yaw_rate_deg").as_double();
 
+        this->declare_parameter<bool>("gate1_straight_servoing", true);
+        bool gate1_straight_servoing = this->get_parameter("gate1_straight_servoing").as_bool();
+
+        this->declare_parameter<double>("gate1_servoing_speed", 12.0);
+        double gate1_servoing_speed = this->get_parameter("gate1_servoing_speed").as_double();
+
+        this->declare_parameter<double>("gate1_servoing_kp", 4.0);
+        double gate1_servoing_kp = this->get_parameter("gate1_servoing_kp").as_double();
+
+        this->declare_parameter<double>("gate1_slow_distance", 15.0);
+        double gate1_slow_distance = this->get_parameter("gate1_slow_distance").as_double();
+
+        this->declare_parameter<double>("gate1_slow_speed", 3.0);
+        double gate1_slow_speed = this->get_parameter("gate1_slow_speed").as_double();
+
         policy_.init(this, model_path);
         policy_.setTripleGatePassMethod(triple_gate_pass_method);
         policy_.setMaxAccel(max_accel);
@@ -180,6 +197,11 @@ public:
         policy_.setEnableGate1_1(enable_gate_1_1);
         policy_.setMaxActionMagnitude(max_action_magnitude);
         policy_.setMaxYawRateDeg(max_yaw_rate_deg);
+        policy_.setGate1StraightServoing(gate1_straight_servoing);
+        policy_.setGate1ServoingSpeed(gate1_servoing_speed);
+        policy_.setGate1ServoingKp(gate1_servoing_kp);
+        policy_.setGate1SlowDistance(gate1_slow_distance);
+        policy_.setGate1SlowSpeed(gate1_slow_speed);
 
         this->declare_parameter<double>("target_altitude", 1.0);
         target_altitude_ = this->get_parameter("target_altitude").as_double();
@@ -848,6 +870,25 @@ private:
             });
     }
 
+    void requestResetGates()
+    {
+        if (reset_gates_client_ && reset_gates_client_->service_is_ready()) {
+            auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+            reset_gates_client_->async_send_request(
+                request,
+                [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+                    try {
+                        auto response = future.get();
+                        if (response->success) {
+                            RCLCPP_INFO(this->get_logger(), "Gate estimator reset success: %s", response->message.c_str());
+                        }
+                    } catch (const std::exception & e) {
+                        RCLCPP_WARN(this->get_logger(), "Gate estimator reset call failed: %s", e.what());
+                    }
+                });
+        }
+    }
+
     FSMState current_fsm_state_;
     mavros_msgs::msg::State current_mavros_state_;
     geometry_msgs::msg::PoseStamped current_pose_;
@@ -887,6 +928,7 @@ private:
     rclcpp::Client<mavros_msgs::srv::SetMode>::SharedPtr set_mode_client_;
     rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr takeoff_client_;
     rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr land_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr reset_gates_client_;
     rclcpp::Service<mavros_controller::srv::SetString>::SharedPtr change_state_srv_;
 
     rclcpp::TimerBase::SharedPtr timer_;

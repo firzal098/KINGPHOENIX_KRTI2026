@@ -62,6 +62,15 @@ public:
         if (node_->has_parameter("max_yaw_rate_deg")) {
             setMaxYawRateDeg(node_->get_parameter("max_yaw_rate_deg").as_double());
         }
+        if (node_->has_parameter("gate1_straight_servoing")) {
+            gate1_straight_servoing_ = node_->get_parameter("gate1_straight_servoing").as_bool();
+        }
+        if (node_->has_parameter("gate1_servoing_speed")) {
+            gate1_servoing_speed_ = node_->get_parameter("gate1_servoing_speed").as_double();
+        }
+        if (node_->has_parameter("gate1_servoing_kp")) {
+            gate1_servoing_kp_ = node_->get_parameter("gate1_servoing_kp").as_double();
+        }
 
         auto qos_reliable = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
         auto qos_best_effort = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
@@ -766,6 +775,66 @@ public:
     }
 
     /**
+     * @brief Direct Line-of-Sight & Enforced Proportional Visual Servoing Controller for Gate 1.
+     * Computes Body FLU velocity action [v_fwd, v_left, yaw_rate] straight toward Gate 1 center
+     * with enforced cross-track lateral correction and bearing alignment.
+     */
+    std::array<double, 3> compute_gate1_servoing_action()
+    {
+        double px = current_local_pose_.pose.position.x;
+        double py = current_local_pose_.pose.position.y;
+        double pz = current_local_pose_.pose.position.z;
+
+        geometry_msgs::msg::Pose gate_pose = getGatePose(0, 0, px, py, pz);
+
+        // Transform gate center offset into Body FLU frame
+        auto p_gate_flu = transformWorldENUtoBodyFLU(gate_pose.position.x - px, gate_pose.position.y - py, gate_pose.position.z - pz);
+        double d_fwd  = p_gate_flu[0];
+        double d_left = p_gate_flu[1];
+
+        // Total 2D horizontal distance to Gate 1 center
+        double dist_to_gate = std::hypot(d_fwd, d_left);
+        double safe_dist = std::max(0.5, dist_to_gate);
+
+        // 1. Cruise / Approach Speed Selection (slows down to gate1_slow_speed_ at <= gate1_slow_distance_)
+        double target_speed = (dist_to_gate <= gate1_slow_distance_) ? gate1_slow_speed_ : gate1_servoing_speed_;
+        target_speed = std::clamp(target_speed, 1.0, max_action_magnitude_);
+
+        // 2. Line of Sight (LOS) Vector Projection
+        // Directly directs the velocity vector along the straight ray to gate center
+        double u_fwd  = std::max(0.0, d_fwd / safe_dist);
+        double u_left = d_left / safe_dist;
+
+        double v_fwd_base  = target_speed * u_fwd;
+        double v_left_base = target_speed * u_left;
+
+        // 3. Enforced Cross-Track Lateral Correction
+        // Adds high-gain lateral proportional feedback (v_left_corr = Kp * d_left)
+        // to forcefully pull the drone onto the gate centerline
+        double v_left_corr = gate1_servoing_kp_ * d_left;
+        double v_left = std::clamp(v_left_base + v_left_corr, -8.0, 8.0);
+        double v_fwd  = std::clamp(v_fwd_base, 1.0, max_action_magnitude_);
+
+        // 4. Proportional yaw alignment to gate bearing
+        double bearing = std::atan2(d_left, std::max(0.5, d_fwd));
+        double yaw_rate = std::clamp(4.0 * bearing, -max_yaw_rate_rad_, max_yaw_rate_rad_);
+
+        // Apply global horizontal magnitude limit
+        double horiz_mag = std::hypot(v_fwd, v_left);
+        if (horiz_mag > max_action_magnitude_ && horiz_mag > 1e-6) {
+            double scale = max_action_magnitude_ / horiz_mag;
+            v_fwd *= scale;
+            v_left *= scale;
+        }
+
+        prev_action_[0] = v_fwd;
+        prev_action_[1] = v_left;
+        prev_action_[2] = yaw_rate;
+
+        return {v_fwd, v_left, yaw_rate};
+    }
+
+    /**
      * @brief Evaluates whether the drone has passed the active target sub-gate plane.
      * Uses robust bidirectional ray-plane intersection and proximity fallback.
      * If active sub-gate is passed, advances to sub-gate k+1; if no more sub-gates left,
@@ -886,7 +955,7 @@ public:
     }
 
     /**
-     * @brief Executes 1 policy step (Obs -> Inference -> Gate Check -> Telemetry Pub -> MAVROS PositionTarget).
+     * @brief Executes 1 policy step (Obs -> Inference/Servoing -> Gate Check -> Telemetry Pub -> MAVROS PositionTarget).
      * @return mavros_msgs::msg::PositionTarget formatted setpoint for /mavros/setpoint_raw/local
      */
     mavros_msgs::msg::PositionTarget step()
@@ -894,8 +963,14 @@ public:
         // 1. Compute 42D Observation Vector & Publish Telemetry
         publishObservation();
 
-        // 2. Compute 3D Action Vector via ONNX model (in Body FLU)
-        auto action = get_action_spaces();
+        // 2. Compute 3D Action Vector:
+        // Use direct visual servoing when targeting Gate 1 main, switch to RL ONNX policy for all subsequent gates
+        std::array<double, 3> action;
+        if (gate1_straight_servoing_ && current_gate_target_index_ == 0 && current_sub_gate_index_ == 0) {
+            action = compute_gate1_servoing_action();
+        } else {
+            action = get_action_spaces();
+        }
 
         // 3. Publish Action Telemetry (3D) to /policy/action
         if (pub_action_) {
@@ -948,7 +1023,7 @@ public:
         double target_z = 1.0;
         if (!current_gate_poses_.poses.empty() && current_gate_target_index_ < current_gate_poses_.poses.size()) {
             double gz = current_gate_poses_.poses[current_gate_target_index_].position.z;
-            if (gz >= 0.5 && gz <= 2.5) {
+            if (gz > 0.3 && gz < 3.5) {
                 target_z = gz;
             }
         }
@@ -977,12 +1052,10 @@ public:
             filtered_vy_ = vy_world;
         }
 
-        // Commanded targets streamed to MAVROS
+        setpoint.position.z = target_z;
         setpoint.velocity.x = filtered_vx_;
         setpoint.velocity.y = filtered_vy_;
         setpoint.velocity.z = 0.0;
-
-        // Yaw rate (CCW positive in FLU/ENU)
         setpoint.yaw_rate = action[2];
 
         return setpoint;
@@ -1007,16 +1080,16 @@ public:
     }
 
     // Getters and Setters
+    bool isAllGatesCleared() const
+    {
+        if (current_gate_poses_.poses.empty()) return false;
+        return current_gate_target_index_ >= current_gate_poses_.poses.size();
+    }
+
     size_t getTargetGateIndex() const { return current_gate_target_index_; }
     size_t getTargetSubGateIndex() const { return current_sub_gate_index_; }
     size_t getPreviewGateIndex() const { return current_preview_gate_index_; }
     size_t getPreviewSubGateIndex() const { return current_preview_sub_gate_index_; }
-    bool isAllGatesCleared() const {
-        if (current_gate_poses_.poses.empty()) {
-            return current_gate_target_index_ >= 5;
-        }
-        return current_gate_target_index_ >= current_gate_poses_.poses.size();
-    }
     void setTargetGateIndex(size_t index, size_t sub_index = 0) {
         current_gate_target_index_ = index;
         current_sub_gate_index_ = sub_index;
@@ -1037,6 +1110,16 @@ public:
     void setMaxYawRateDeg(double max_yaw_deg) { setMaxYawRateRad(max_yaw_deg * M_PI / 180.0); }
     double getMaxYawRateRad() const { return max_yaw_rate_rad_; }
     double getMaxYawRateDeg() const { return max_yaw_rate_rad_ * 180.0 / M_PI; }
+    void setGate1StraightServoing(bool enable) { gate1_straight_servoing_ = enable; }
+    bool getGate1StraightServoing() const { return gate1_straight_servoing_; }
+    void setGate1ServoingSpeed(double speed) { gate1_servoing_speed_ = std::clamp(speed, 2.0, 16.0); }
+    double getGate1ServoingSpeed() const { return gate1_servoing_speed_; }
+    void setGate1ServoingKp(double kp) { gate1_servoing_kp_ = std::clamp(kp, 0.1, 10.0); }
+    double getGate1ServoingKp() const { return gate1_servoing_kp_; }
+    void setGate1SlowDistance(double dist) { gate1_slow_distance_ = std::max(0.0, dist); }
+    double getGate1SlowDistance() const { return gate1_slow_distance_; }
+    void setGate1SlowSpeed(double speed) { gate1_slow_speed_ = std::clamp(speed, 1.0, 16.0); }
+    double getGate1SlowSpeed() const { return gate1_slow_speed_; }
     const std::array<double, 42>& getObservationVector() const { return observation_vector_; }
 
 private:
@@ -1075,6 +1158,11 @@ private:
     bool enable_gate_1_1_{true};
     double max_action_magnitude_{16.0};
     double max_yaw_rate_rad_{2.0 * M_PI};
+    bool gate1_straight_servoing_{true};
+    double gate1_servoing_speed_{12.0};
+    double gate1_servoing_kp_{4.0};
+    double gate1_slow_distance_{15.0};
+    double gate1_slow_speed_{3.0};
 
     double filtered_vx_{0.0};
     double filtered_vy_{0.0};
