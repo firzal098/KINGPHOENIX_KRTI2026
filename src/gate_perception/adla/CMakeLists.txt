@@ -48,6 +48,30 @@ target_link_libraries(gate_perception
   ${OpenCV_LIBRARIES}
 )
 
+# Executable target: test_offline_inference
+add_executable(test_offline_inference
+  src/test_offline_inference.cpp
+  src/adla_engine.cpp
+  src/yolo_pose_decoder.cpp
+)
+
+target_include_directories(test_offline_inference PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+ament_target_dependencies(test_offline_inference
+  rclcpp
+  sensor_msgs
+  std_msgs
+  geometry_msgs
+  ament_index_cpp
+)
+
+target_link_libraries(test_offline_inference
+  ${OpenCV_LIBRARIES}
+)
+
 # Architecture-specific NNSDK link configuration
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
   message(STATUS "[adla_gate_inference] Target architecture is ARM64 (aarch64). Configuring native AMLogic NNSDK.")
@@ -65,9 +89,14 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
   if(NNSDK_LIB)
     message(STATUS "[adla_gate_inference] Linking against NNSDK library: ${NNSDK_LIB}")
     target_link_libraries(gate_perception ${NNSDK_LIB})
+    target_link_libraries(test_offline_inference ${NNSDK_LIB})
     
     # Configure RPATH so the runtime linker finds libnnsdk.so
     set_target_properties(gate_perception PROPERTIES
+      BUILD_RPATH "$ORIGIN/../lib:${CMAKE_CURRENT_SOURCE_DIR}/lib/aarch64"
+      INSTALL_RPATH "$ORIGIN/../lib"
+    )
+    set_target_properties(test_offline_inference PROPERTIES
       BUILD_RPATH "$ORIGIN/../lib:${CMAKE_CURRENT_SOURCE_DIR}/lib/aarch64"
       INSTALL_RPATH "$ORIGIN/../lib"
     )
@@ -80,11 +109,17 @@ else()
 endif()
 
 # Installation
-install(TARGETS gate_perception
+install(TARGETS
+  gate_perception
+  test_offline_inference
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY resource
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(DIRECTORY tests
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -93,3 +128,4 @@ install(DIRECTORY include/
 )
 
 ament_package()
+
