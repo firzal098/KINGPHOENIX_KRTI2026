@@ -378,6 +378,10 @@ private:
             for (size_t sub_k = 0; sub_k < sub_offsets.size(); ++sub_k) {
                 double s_off = sub_offsets[sub_k];
                 Eigen::Vector3d sub_pos = state.position_enu + s_off * state.normal_enu;
+                if (state.id == 3 && sub_k == 1) { // Gate 3.2
+                    Eigen::Vector3d right_enu(state.normal_enu.y(), -state.normal_enu.x(), 0.0);
+                    sub_pos += 0.2 * right_enu;
+                }
                 int sub_id_num = state.id * 10 + (sub_k + 1);
 
                 visualization_msgs::msg::Marker init_sub_box = init_box;
@@ -1514,13 +1518,13 @@ private:
             std::vector<double> sub_offsets;
             if (v7_) {
                 if (gate.id == 3) {
-                    sub_offsets = {1.0, 2.0};
+                    sub_offsets = {1.0, 2.5};
                 } else if (gate.id == 4) {
                     sub_offsets = {1.0, 2.0, 3.0};
                 }
             } else {
                 if (gate.id == 3) {
-                    sub_offsets = {1.0};
+                    sub_offsets = {1.0, 2.5};
                 } else if (gate.id == 4) {
                     sub_offsets = {1.0, 2.0};
                 }
@@ -1529,6 +1533,10 @@ private:
             for (size_t sub_k = 0; sub_k < sub_offsets.size(); ++sub_k) {
                 double s_off = sub_offsets[sub_k];
                 Eigen::Vector3d sub_pos = gate.position_enu + s_off * gate.normal_enu;
+                if (gate.id == 3 && sub_k == 1) { // Gate 3.2
+                    Eigen::Vector3d right_enu(gate.normal_enu.y(), -gate.normal_enu.x(), 0.0);
+                    sub_pos += 0.2 * right_enu;
+                }
                 int sub_id_num = gate.id * 10 + (sub_k + 1);
 
                 visualization_msgs::msg::Marker sub_box = box;

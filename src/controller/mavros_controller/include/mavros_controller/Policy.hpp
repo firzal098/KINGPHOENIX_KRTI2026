@@ -228,6 +228,7 @@ public:
         } else {
             if (main_gate_idx == 2) {
                 if (sub_idx == 1) return 1.0;
+                if (sub_idx == 2) return 2.5;
             } else if (main_gate_idx == 3) {
                 if (sub_idx == 1) return 1.0;
                 if (sub_idx == 2) return 2.0;
@@ -338,6 +339,19 @@ public:
             pose.position.x += offset * nx;
             pose.position.y += offset * ny;
             pose.position.z += offset * nz;
+
+            // Gate 3.2 (main 2, sub 2): Lateral offset to the right by 0.2m
+            if (main_gate_idx == 2 && sub_idx == 2) {
+                // Right vector = normal x up [0, 0, 1] = [ny, -nx, 0]
+                double rx = ny;
+                double ry = -nx;
+                double rz = 0.0;
+                const double lat_right_offset = 0.2; // 0.2m to the right
+
+                pose.position.x += lat_right_offset * rx;
+                pose.position.y += lat_right_offset * ry;
+                pose.position.z += lat_right_offset * rz;
+            }
         }
 
         return pose;

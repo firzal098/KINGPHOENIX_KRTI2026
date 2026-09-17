@@ -618,6 +618,12 @@
         const rightDist = -1.0;
         offX = fwdDist * Math.cos(base.yaw) + rightDist * Math.sin(base.yaw);
         offZ = -fwdDist * Math.sin(base.yaw) + rightDist * Math.cos(base.yaw);
+      } else if (gate.mainId === 3 && gate.subIndex === 2) {
+        // Gate 3.2: 2.5m forward (+fwd) and +0.2m lateral to the right
+        const fwdDist = 2.5;
+        const rightDist = 0.2;
+        offX = fwdDist * Math.cos(base.yaw) + rightDist * Math.sin(base.yaw);
+        offZ = -fwdDist * Math.sin(base.yaw) + rightDist * Math.cos(base.yaw);
       }
 
       const posX = currentBase.posX + offX;
